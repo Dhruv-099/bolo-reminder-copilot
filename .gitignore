@@ -16,6 +16,9 @@ media_root/
 # Environment variables
 .env
 
+# Synapse CLI project state (scan cache)
+.synapse/
+
 # IDE / OS specific
 .vscode/
 .idea/
