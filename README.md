@@ -85,11 +85,18 @@ as before, agent or no agent.
 ```bash
 npm install -g @2ndbrainlabs-ai/synapse-cli     # needs Node.js 20+
 
-# Local build (your own model key, no Synapse account, no quota):
-set ANTHROPIC_API_KEY=sk-ant-...               # or another provider
-synapse model                                   # verify provider detection
+# Local build (your own model key, no Synapse account, no quota).
+# One Sarvam key covers the codegen too, via Token Factory's
+# OpenAI-compatible /v2 chat endpoint (it accepts Bearer auth):
+set SYNAPSE_LLM_API_KEY=<same key as SARVAM_API_KEY>
+synapse model set custom --base-url https://api.sarvam.ai/v2 --model sarvam-105b --global
 synapse build --local --custom --query "Compose a tool named dispatch_due_reminders that finds due Events, personalizes each message_template, translates to each Person's preferred_language via Sarvam, generates speech audio with Sarvam Bulbul, and only when confirm=true records dispatch timestamps and skips already-dispatched events. Use notifier.services.reminder_dispatch and notifier.services.sarvam_service."
 ```
+
+If the generated tool plan misses the schema on the custom path, first try
+`--no-tool-choice` (Synapse then coerces JSON output instead), then pin a
+different Token Factory model (`glm5.3`, `deepseekv4.1-flash-1017`), and only
+then fall back to a direct `ANTHROPIC_API_KEY`.
 
 This writes `dispatch_due_reminders_server.py` into the project root and
 prints a client config snippet. (Hosted builds - `synapse init` then
