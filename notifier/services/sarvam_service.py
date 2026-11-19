@@ -95,17 +95,34 @@ def default_tts_model():
     return os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
 
 
-def default_tts_speaker(model=None):
-    """Speaker voice for the given model (env override: SARVAM_TTS_SPEAKER).
+# Persona voices for bulbul:v4-flash, chosen per language for a warm
+# customer-reminder tone. Malayalam and Odia have no v4-flash voices yet;
+# generate_voice_audio() falls those back to bulbul:v3.
+V4_SPEAKERS = {
+    "en-IN": "neha_en_customer",
+    "hi-IN": "aparna_hi_customer",
+    "te-IN": "kavitha_te_conversation",
+    "ta-IN": "gokul_ta_narration",
+    "mr-IN": "ishita_mr_conversational",
+    "kn-IN": "chaitra_kn_conversation",
+    "bn-IN": "roopa_bn_conversational",
+    "gu-IN": "bhavik_gu_conversation",
+    "pa-IN": "anand_pa_customer",
+}
 
-    v3 uses short names (shubh); v4-flash uses persona ids
-    (e.g. aparna_hi_customer). The defaults match each model.
+
+def default_tts_speaker(model=None, language_code="en-IN"):
+    """Speaker voice for the given model and language (env override:
+    SARVAM_TTS_SPEAKER).
+
+    v3 uses language-agnostic short names (shubh); v4-flash uses
+    per-language persona ids (see V4_SPEAKERS).
     """
     override = os.getenv("SARVAM_TTS_SPEAKER")
     if override:
         return override
     if (model or default_tts_model()).startswith("bulbul:v4"):
-        return "shubh_enhi_ads"  # v4-flash default persona
+        return V4_SPEAKERS.get(language_code, "shubh_enhi_ads")
     return "shubh"  # v3 default
 
 
@@ -124,7 +141,13 @@ def generate_voice_audio(text, language_code, speaker=None, model=None, event_id
         return None
 
     model = model or default_tts_model()
-    speaker = speaker or default_tts_speaker(model)
+    if model.startswith("bulbul:v4") and language_code not in V4_SPEAKERS:
+        logger.warning(
+            "bulbul:v4-flash has no %s voices yet; falling back to bulbul:v3.",
+            language_code,
+        )
+        model = "bulbul:v3"
+    speaker = speaker or default_tts_speaker(model, language_code)
     payload = {
         "text": text[:2500],  # Bulbul v3/v4 request limit
         "language_code": language_code,
