@@ -44,7 +44,7 @@ workflow is a conversation (or one dashboard, or one cron call - your pick).
 | **MCP tools** | `dispatch_due_reminders`, `add_reminder`, `reschedule_event`, `cancel_reminder`, `list_responses`, `reminder_digest`. |
 | **Management commands** | `send_notifications` (manual), `auto_dispatch` (cron-friendly; `--loop-minutes N` to keep running). |
 | **Reply webhook** | `POST /notifier/webhook/response/` — token-authenticated (Bearer / X-Api-Key, `BOLO_WEBHOOK_TOKEN`), CSRF-exempt endpoint that a real IVR or WhatsApp bridge posts `{"event_id", "digit", "channel"}` into. Disabled (403) until the token is set. |
-| **DevOps** | `Dockerfile` + `docker-compose.yml` (migrations on start, media volume), GitHub Actions CI (system check, migration check, full test suite — runs offline, no API key). |
+| **DevOps** | `Dockerfile` + `docker-compose.yml` (migrations + first-boot demo seed on start, media volume, auto-restart), GitHub Actions CI (system check, migration check, full test suite — runs offline, no API key). |
 | **Test suite** | 62 tests, Sarvam mocked - `python manage.py test notifier` runs offline in ~4s. |
 
 The reminder lifecycle knows about quiet hours (per person, wraps midnight),
