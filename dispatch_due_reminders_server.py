@@ -13,16 +13,28 @@ scaffold:
 - list_responses           — who confirmed / declined / is still silent
 - reminder_digest          — morning round: due today, replies, retries
 
+Every tool is declared async and runs its sync (Django ORM) body in a worker
+thread via run_sync: FastMCP calls sync tool functions directly on its
+asyncio event loop, and Django raises SynchronousOnlyOperation from there.
+
 Run:  python dispatch_due_reminders_server.py
 """
 from __future__ import annotations
 
+import functools
+
+import anyio
 from mcp.server.fastmcp import FastMCP
 
 from notifier.services.reminder_dispatch import dispatch_due_reminders  # bootstraps Django
 from notifier.services import agent_tools
 
 mcp = FastMCP("bolo")
+
+
+async def run_sync(func, /, **kwargs):
+    """Await a sync Django-ORM callable on a worker thread (see module docstring)."""
+    return await anyio.to_thread.run_sync(functools.partial(func, **kwargs))
 
 
 @mcp.tool(
@@ -35,13 +47,13 @@ mcp = FastMCP("bolo")
         "event_ids (list of integers) to scope the run to specific events."
     ),
 )
-def dispatch_due_reminders_tool(confirm: bool = False, event_ids: list[int] | None = None) -> dict:
+async def dispatch_due_reminders_tool(confirm: bool = False, event_ids: list[int] | None = None) -> dict:
     """Preview (confirm=false) or dispatch (confirm=true) due reminders."""
     if not isinstance(confirm, bool):
         return {"error": "confirm must be a bool"}
     if event_ids is not None and not isinstance(event_ids, list):
         return {"error": "event_ids must be a list of integers"}
-    return dispatch_due_reminders(confirm=confirm, event_ids=event_ids)
+    return await run_sync(dispatch_due_reminders, confirm=confirm, event_ids=event_ids)
 
 
 @mcp.tool(
@@ -54,7 +66,7 @@ def dispatch_due_reminders_tool(confirm: bool = False, event_ids: list[int] | No
         "time arrives."
     ),
 )
-def add_reminder_tool(
+async def add_reminder_tool(
     person_name: str,
     phone_number: str,
     what: str,
@@ -67,7 +79,8 @@ def add_reminder_tool(
     person_email: str | None = None,
 ) -> dict:
     """Conversational intake: 'remind Ravi about his dental appointment Friday 4pm, in Telugu'."""
-    return agent_tools.add_reminder(
+    return await run_sync(
+        agent_tools.add_reminder,
         person_name=person_name,
         phone_number=phone_number,
         what=what,
@@ -90,8 +103,8 @@ def add_reminder_tool(
         "for the new slot."
     ),
 )
-def reschedule_event_tool(event_id: int, when: str, note: str = "") -> dict:
-    return agent_tools.reschedule_event(event_id=event_id, when=when, note=note)
+async def reschedule_event_tool(event_id: int, when: str, note: str = "") -> dict:
+    return await run_sync(agent_tools.reschedule_event, event_id=event_id, when=when, note=note)
 
 
 @mcp.tool(
@@ -101,8 +114,8 @@ def reschedule_event_tool(event_id: int, when: str, note: str = "") -> dict:
         "all due/dispatch runs."
     ),
 )
-def cancel_reminder_tool(event_id: int, reason: str = "") -> dict:
-    return agent_tools.cancel_reminder(event_id=event_id, reason=reason)
+async def cancel_reminder_tool(event_id: int, reason: str = "") -> dict:
+    return await run_sync(agent_tools.cancel_reminder, event_id=event_id, reason=reason)
 
 
 @mcp.tool(
@@ -113,8 +126,8 @@ def cancel_reminder_tool(event_id: int, reason: str = "") -> dict:
         "'confirmed', 'declined' or 'pending'."
     ),
 )
-def list_responses_tool(status: str | None = None) -> dict:
-    return agent_tools.list_responses(status=status)
+async def list_responses_tool(status: str | None = None) -> dict:
+    return await run_sync(agent_tools.list_responses, status=status)
 
 
 @mcp.tool(
@@ -124,8 +137,8 @@ def list_responses_tool(status: str | None = None) -> dict:
         "awaited, and dispatched reminders eligible for a retry nudge."
     ),
 )
-def reminder_digest_tool() -> dict:
-    return agent_tools.reminder_digest()
+async def reminder_digest_tool() -> dict:
+    return await run_sync(agent_tools.reminder_digest)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,8 @@
     "servers": {
       "bolo": {
         "type": "local",
-        "command": [".venv/Scripts/python.exe", "dispatch_due_reminders_server.py"],
+        // Linux venv layout (was ".venv/Scripts/python.exe", Windows-only).
+        "command": ["/home/dhruv/bolo-reminder-copilot/.venv/bin/python", "dispatch_due_reminders_server.py"],
         "environment": {
           "DJANGO_SETTINGS_MODULE": "notification_project.settings"
         },
