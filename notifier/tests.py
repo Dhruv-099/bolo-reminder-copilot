@@ -1,3 +1,515 @@
-from django.test import TestCase
+"""Bolo test suite: templates, dispatch workflow, responses, agent tools, views.
 
-# Create your tests here.
+Sarvam is mocked everywhere, so the suite runs offline and fast. Run with:
+
+    python manage.py test notifier
+"""
+
+from datetime import datetime, time, timedelta
+from unittest import mock
+
+from django.test import Client, TestCase
+from django.utils import timezone
+
+from notifier.models import Event, Person
+from notifier.services import agent_tools, sarvam_service
+from notifier.services.reminder_dispatch import (
+    dispatch_due_reminders,
+    find_due_events,
+    find_retry_due_events,
+    is_quiet_now,
+    personalize_message,
+)
+from notifier.services.responses import record_response
+
+
+def make_person(name="Test Person", phone="+919000000099", language="hi-IN", **kwargs):
+    return Person.objects.create(
+        name=name, phone_number=phone, preferred_language=language, **kwargs
+    )
+
+
+def make_event(person, minutes_from_now=30, lead=120, **kwargs):
+    defaults = dict(
+        event_type=Event.EventType.REMINDER,
+        event_datetime=timezone.now() + timedelta(minutes=minutes_from_now),
+        message_template="Hi {name}, your {event_type_display} '{details}' is {time_left}.",
+        details="Test detail",
+        notification_lead_time_minutes=lead,
+    )
+    defaults.update(kwargs)
+    return Event.objects.create(person=person, **defaults)
+
+
+def mocked_sarvam(translate="नमस्ते", audio="reminders/test.wav"):
+    """Context manager mocking both Sarvam calls the dispatch workflow makes."""
+    return mock.patch.multiple(
+        sarvam_service,
+        translate_message=mock.DEFAULT if translate is None else mock.DEFAULT,
+        generate_voice_audio=mock.DEFAULT,
+    ), translate, audio
+
+
+class SarvamMockMixin:
+    """Patches the two Sarvam calls for the duration of a test."""
+
+    def setUp(self):
+        super().setUp()
+        sarvam_service.clear_service_caches()
+        patcher_t = mock.patch.object(sarvam_service, "translate_message", return_value="नमस्ते")
+        patcher_a = mock.patch.object(
+            sarvam_service, "generate_voice_audio", return_value="reminders/test.wav"
+        )
+        self.mock_translate = patcher_t.start()
+        self.mock_audio = patcher_a.start()
+        self.addCleanup(patcher_t.stop)
+        self.addCleanup(patcher_a.stop)
+
+
+class PersonalizeMessageTests(TestCase):
+    def test_replaces_known_placeholders(self):
+        person = make_person(name="Rahul Verma")
+        event = make_event(person, details="Project Alpha Sync")
+        text = personalize_message(event)
+        self.assertIn("Rahul", text)
+        self.assertIn("Project Alpha Sync", text)
+        self.assertIn("generic reminder", text.lower())
+
+    def test_unknown_placeholder_renders_safely(self):
+        event = make_event(make_person(), message_template="Hi {name}, {unknown_tag} at {time}.")
+        text = personalize_message(event)
+        self.assertIn("Hi Test", text)
+        self.assertNotIn("{", text)
+
+    def test_stray_braces_are_dropped(self):
+        event = make_event(make_person(), message_template="Hi {name} {{literal}} bye.")
+        text = personalize_message(event)
+        self.assertNotIn("{{literal}}", text)
+
+
+class DueSelectionTests(TestCase):
+    def test_not_due_before_lead_time(self):
+        # Event is 5 hours away; a 60-minute lead time means it fires in ~4 hours.
+        event = make_event(make_person(), minutes_from_now=300, lead=60)
+        self.assertFalse(event.is_notification_due)
+
+    def test_due_at_lead_time(self):
+        event = make_event(make_person(), minutes_from_now=60, lead=120)
+        self.assertTrue(event.is_notification_due)
+
+    def test_dispatched_and_cancelled_excluded(self):
+        person = make_person()
+        dispatched = make_event(person, voice_dispatched_at=timezone.now())
+        cancelled = make_event(person, cancelled_at=timezone.now())
+        fresh = make_event(person)
+        due_ids = {event.id for event in find_due_events()}
+        self.assertIn(fresh.id, due_ids)
+        self.assertNotIn(dispatched.id, due_ids)
+        self.assertNotIn(cancelled.id, due_ids)
+
+    def test_retry_ladder(self):
+        person = make_person()
+        seven_hours_ago = timezone.now() - timedelta(hours=7)
+        base = dict(
+            voice_dispatched_at=seven_hours_ago,
+            response_value=Event.ResponseValue.PENDING,
+            dispatch_attempts=1,
+        )
+        retryable = make_event(person, **base)
+        maxed = make_event(person, **{**base, "dispatch_attempts": 2})
+        answered = make_event(person, **{**base, "response_value": Event.ResponseValue.CONFIRMED})
+        too_soon = make_event(person, **{**base, "voice_dispatched_at": timezone.now() - timedelta(hours=1)})
+        due = {event.id for event in find_retry_due_events()}
+        self.assertIn(retryable.id, due)
+        self.assertNotIn(maxed.id, due)
+        self.assertNotIn(answered.id, due)
+        self.assertNotIn(too_soon.id, due)
+
+    def test_quiet_hours_wrap_midnight(self):
+        person = make_person(quiet_hours_start=time(22, 0), quiet_hours_end=time(8, 0))
+        self.assertTrue(is_quiet_now(person, at=datetime(2026, 1, 1, 23, 30)))
+        self.assertTrue(is_quiet_now(person, at=datetime(2026, 1, 1, 6, 0)))
+        self.assertFalse(is_quiet_now(person, at=datetime(2026, 1, 1, 12, 0)))
+        self.assertFalse(is_quiet_now(make_person()))  # no quiet hours configured
+
+
+class DispatchWorkflowTests(SarvamMockMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.person = make_person(language="hi-IN")
+        self.event = make_event(self.person)
+
+    def test_confirm_persists_transcripts_and_attempts(self):
+        report = dispatch_due_reminders(confirm=True)
+        self.event.refresh_from_db()
+        self.assertEqual(report["dispatched"], 1)
+        self.assertEqual(report["results"][0]["status"], "dispatched")
+        self.assertIsNotNone(self.event.voice_dispatched_at)
+        self.assertEqual(self.event.voice_transcript_local, "नमस्ते")
+        self.assertIn("Hi Test", self.event.voice_transcript_english)
+        self.assertEqual(self.event.dispatch_attempts, 1)
+        self.assertEqual(self.event.voice_audio_path, "reminders/test.wav")
+
+    def test_second_run_is_idempotent(self):
+        first = dispatch_due_reminders(confirm=True)
+        second = dispatch_due_reminders(confirm=True)
+        self.assertEqual(first["dispatched"], 1)
+        self.assertEqual(second["due_found"], 0)
+        self.assertEqual(second["message"], "No due events found.")
+
+    def test_preview_changes_nothing(self):
+        report = dispatch_due_reminders(confirm=False)
+        self.event.refresh_from_db()
+        self.assertEqual(report["results"][0]["status"], "ready")
+        self.assertIsNone(self.event.voice_dispatched_at)
+        self.assertEqual(self.event.dispatch_attempts, 0)
+        self.assertEqual(report["due_found"], 1)
+        self.assertEqual(report["dispatched"], 0)
+
+    def test_concurrent_dispatch_marks_skipped(self):
+        # Simulate the race the way it actually happens: another run writes
+        # the dispatch timestamp to the DB *after* our snapshot was taken
+        # (so the in-memory event still sees voice_dispatched_at=None).
+        Event.objects.filter(pk=self.event.pk).update(voice_dispatched_at=timezone.now())
+        with mock.patch(
+            "notifier.services.reminder_dispatch.find_due_events", return_value=[self.event]
+        ):
+            report = dispatch_due_reminders(confirm=True)
+        self.event.refresh_from_db()
+        self.assertEqual(report["results"][0]["status"], "skipped")
+        self.assertEqual(report["results"][0]["error"], "already_dispatched_concurrently")
+        self.assertEqual(self.event.dispatch_attempts, 0, "skipped events must stay untouched")
+
+    def test_quiet_hours_hold(self):
+        self.person.quiet_hours_start = time(0, 0)
+        self.person.quiet_hours_end = time(23, 59)
+        self.person.save()
+        report = dispatch_due_reminders(confirm=True)
+        self.event.refresh_from_db()
+        self.assertEqual(report["results"][0]["status"], "held_quiet_hours")
+        self.assertEqual(report["held_quiet_hours"], 1)
+        self.assertIsNone(self.event.voice_dispatched_at)
+        self.mock_translate.assert_not_called()
+        self.mock_audio.assert_not_called()
+
+    def test_translation_failure_reported_not_raised(self):
+        self.mock_translate.return_value = None
+        report = dispatch_due_reminders(confirm=False)
+        item = report["results"][0]
+        self.assertEqual(item["status"], "error")
+        self.assertEqual(item["error"], "translation_failed")
+        self.event.refresh_from_db()
+        self.assertIsNone(self.event.voice_dispatched_at)
+
+    def test_tts_failure_reported_not_raised(self):
+        self.mock_audio.return_value = None
+        report = dispatch_due_reminders(confirm=False)
+        item = report["results"][0]
+        self.assertEqual(item["status"], "error")
+        self.assertEqual(item["error"], "audio_failed")
+
+    def test_scoped_event_ids(self):
+        other = make_event(make_person(phone="+919000000098"))
+        report = dispatch_due_reminders(confirm=True, event_ids=[self.event.id])
+        other.refresh_from_db()
+        self.assertEqual(report["due_found"], 1)
+        self.assertIsNone(other.voice_dispatched_at)
+
+
+class RetryAfterTests(SarvamMockMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.person = make_person(language="hi-IN")
+        self.event = make_event(self.person)
+
+    def test_retry_eligible_event_is_included(self):
+        self.event.voice_dispatched_at = timezone.now() - timedelta(hours=7)
+        self.event.response_value = Event.ResponseValue.PENDING
+        self.event.dispatch_attempts = 1
+        self.event.save()
+        report = dispatch_due_reminders(confirm=True, event_ids=[self.event.id])
+        self.event.refresh_from_db()
+        self.assertEqual(report["results"][0]["status"], "dispatched")
+        self.assertTrue(report["results"][0]["retry"])
+        self.assertEqual(self.event.dispatch_attempts, 2, "retry must bump the attempt count")
+
+
+class ResponseTests(TestCase):
+    def setUp(self):
+        self.person = make_person()
+        self.event = make_event(self.person, voice_dispatched_at=timezone.now())
+
+    def test_press_one_confirms(self):
+        result = record_response(self.event.id, "1")
+        self.event.refresh_from_db()
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.event.response_value, Event.ResponseValue.CONFIRMED)
+        self.assertIsNotNone(self.event.response_received_at)
+        self.assertEqual(self.event.response_channel, "demo_page")
+
+    def test_press_two_declines(self):
+        result = record_response(self.event.id, "2")
+        self.event.refresh_from_db()
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.event.response_value, Event.ResponseValue.DECLINED)
+
+    def test_latest_reply_wins(self):
+        record_response(self.event.id, "2")
+        record_response(self.event.id, "1")
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.CONFIRMED)
+
+    def test_invalid_digit_rejected(self):
+        result = record_response(self.event.id, "9")
+        self.event.refresh_from_db()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "invalid_digit")
+        self.assertEqual(self.event.response_value, Event.ResponseValue.PENDING)
+
+    def test_unsent_event_refused(self):
+        unsent = make_event(self.person)
+        result = record_response(unsent.id, "1")
+        unsent.refresh_from_db()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "not_dispatched")
+        self.assertEqual(unsent.response_value, Event.ResponseValue.PENDING)
+
+    def test_unknown_event(self):
+        result = record_response(999999, "1")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "event_not_found")
+
+
+class PhoneNormalizationTests(TestCase):
+    def test_bare_ten_digits_get_india_code(self):
+        person = Person(name="P", phone_number="9810690521")
+        person.save()
+        self.assertEqual(person.phone_number, "+919810690521")
+
+    def test_twelve_digit_indian_number(self):
+        person = Person(name="P", phone_number="919000000002")
+        person.save()
+        self.assertEqual(person.phone_number, "+919000000002")
+
+    def test_international_passthrough(self):
+        person = Person(name="P", phone_number="+441234567890")
+        person.save()
+        self.assertEqual(person.phone_number, "+441234567890")
+
+    def test_spaces_and_dashes_stripped(self):
+        person = Person(name="P", phone_number="+91 98100 00003")
+        person.save()
+        self.assertEqual(person.phone_number, "+919810000003")
+
+
+class AgentToolsTests(TestCase):
+    def setUp(self):
+        # Never let the LLM draft a real template during tests.
+        patcher = mock.patch.object(
+            agent_tools.llm_draft, "draft_message_template", return_value=None
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_add_reminder_creates_person_and_event(self):
+        result = agent_tools.add_reminder(
+            person_name="Dhruv Test", phone_number="919000009101", what="Dental appointment",
+            when="2026-11-22 16:00", preferred_language="hi-IN", event_type="MEETING",
+            message_template="Hi {name}, your {event_type_display} '{details}' is {time_left}.",
+        )
+        self.assertTrue(result["ok"], result)
+        event = Event.objects.get(pk=result["event_id"])
+        self.assertEqual(event.person.phone_number, "+919000009101")
+        self.assertEqual(event.person.preferred_language, "hi-IN")
+        self.assertFalse(event.is_notification_due, "lead time not reached yet")
+        self.assertFalse(result["template_drafted_by_llm"])
+
+    def test_add_reminder_without_template_uses_llm_or_default(self):
+        result = agent_tools.add_reminder(
+            person_name="No Key", phone_number="+919000009102", what="Voice test",
+            when="2026-11-22 16:00",
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["template_drafted_by_llm"])
+        self.assertEqual(result["message_template"], agent_tools.DEFAULT_TEMPLATE)
+
+    def test_add_reminder_reuses_person_by_phone(self):
+        agent_tools.add_reminder(
+            person_name="First Name", phone_number="+919000009103", what="A",
+            when="2026-11-22 16:00", message_template="Hi {name}, {details}.",
+        )
+        result = agent_tools.add_reminder(
+            person_name="Renamed", phone_number="+919000009103", what="B",
+            when="2026-11-23 10:00", message_template="Hi {name}, {details}.",
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["person_created"])
+        person = Person.objects.get(phone_number="+919000009103")
+        self.assertEqual(person.name, "Renamed")
+
+    def test_add_reminder_validation(self):
+        self.assertEqual(
+            agent_tools.add_reminder(person_name="", phone_number="+910000000000", what="x", when="2026-11-22 16:00")["error"],
+            "missing_person_name",
+        )
+        self.assertEqual(
+            agent_tools.add_reminder(person_name="x", phone_number="12345", what="y", when="2026-11-22 16:00")["error"],
+            "invalid_phone",
+        )
+        self.assertEqual(
+            agent_tools.add_reminder(person_name="x", phone_number="+910000000000", what="y", when="tomorrowish")["error"],
+            "invalid_when",
+        )
+        self.assertEqual(
+            agent_tools.add_reminder(person_name="x", phone_number="+910000000000", what="y", when="2026-11-22 16:00", event_type="BANANA")["error"],
+            "invalid_event_type",
+        )
+
+    def test_parse_when_date_only_defaults_to_nine_am(self):
+        parsed, error = agent_tools._parse_when("2026-11-22")
+        self.assertIsNone(error)
+        self.assertEqual(parsed.hour, 9)
+
+    def test_reschedule_resets_dispatch_state(self):
+        event = make_event(make_person(phone="+919000009104"))
+        event.voice_dispatched_at = timezone.now()
+        event.response_value = Event.ResponseValue.CONFIRMED
+        event.save()
+        result = agent_tools.reschedule_event(event.id, "2026-11-24 09:15")
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["send_state_reset"])
+        event.refresh_from_db()
+        self.assertIsNone(event.voice_dispatched_at)
+        self.assertEqual(event.response_value, Event.ResponseValue.PENDING)
+        self.assertEqual(timezone.localtime(event.event_datetime).hour, 9)
+
+    def test_cancel_and_double_cancel(self):
+        event = make_event(make_person(phone="+919000009105"))
+        first = agent_tools.cancel_reminder(event.id, reason="smoke")
+        self.assertTrue(first["ok"])
+        event.refresh_from_db()
+        self.assertFalse(event.is_notification_due)
+        second = agent_tools.cancel_reminder(event.id)
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["error"], "already_cancelled")
+
+    def test_list_responses_and_digest(self):
+        person = make_person(phone="+919000009106")
+        confirmed = make_event(person, voice_dispatched_at=timezone.now(), response_value=Event.ResponseValue.CONFIRMED)
+        pending = make_event(person, voice_dispatched_at=timezone.now())
+        responses = agent_tools.list_responses()
+        self.assertEqual(responses["confirmed"], 1)
+        self.assertEqual(responses["awaiting_reply"], 1)
+        scoped = agent_tools.list_responses("confirmed")
+        self.assertTrue(all(row["response"] == "CONFIRMED" for row in scoped["results"]))
+
+        digest = agent_tools.reminder_digest()
+        self.assertTrue(digest["ok"])
+        self.assertIn("due_today", digest)
+        self.assertIn("retry_due", digest)
+
+    def test_missing_event_errors(self):
+        self.assertEqual(agent_tools.cancel_reminder(999999)["error"], "event_not_found")
+        self.assertEqual(agent_tools.reschedule_event(999999, "2026-11-22 10:00")["error"], "event_not_found")
+
+
+class ViewTests(SarvamMockMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.client = Client()
+        self.person = make_person()
+        self.dispatched = make_event(
+            self.person,
+            voice_dispatched_at=timezone.now(),
+            voice_audio_path="reminders/x.wav",
+            voice_transcript_english="Hi Test, this is a reminder.",
+            voice_transcript_local="नमस्ते, यह एक अनुस्मारक है।",
+        )
+        self.due = make_event(self.person)
+
+    def test_dashboard_renders(self):
+        response = self.client.get("/notifier/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.person.name)
+
+    def test_respond_page_shows_transcript_and_buttons(self):
+        response = self.client.get(f"/notifier/respond/{self.dispatched.id}/")
+        self.assertContains(response, "नमस्ते")
+        self.assertContains(response, "press 1")
+
+    def test_respond_post_records(self):
+        response = self.client.post(f"/notifier/respond/{self.dispatched.id}/", {"digit": "1"})
+        self.assertEqual(response.status_code, 302)
+        self.dispatched.refresh_from_db()
+        self.assertEqual(self.dispatched.response_value, Event.ResponseValue.CONFIRMED)
+
+    def test_respond_refuses_unsent_event(self):
+        response = self.client.post(f"/notifier/respond/{self.due.id}/", {"digit": "1"})
+        self.assertEqual(response.status_code, 302)
+        self.due.refresh_from_db()
+        self.assertEqual(self.due.response_value, Event.ResponseValue.PENDING)
+
+    def test_preview_of_dispatched_event_redirects_without_sarvam_calls(self):
+        response = self.client.post(f"/notifier/event/{self.dispatched.id}/preview/")
+        self.assertEqual(response.status_code, 302)
+        self.mock_translate.assert_not_called()
+        self.mock_audio.assert_not_called()
+
+    def test_preview_renders_draft(self):
+        fake_report = {
+            "event_id": self.due.id,
+            "person": self.person.name,
+            "event_type": "Generic Reminder",
+            "event_datetime": timezone.localtime(self.due.event_datetime).isoformat(),
+            "language": "hi-IN",
+            "text_english": "Hi Test, your generic reminder 'Test detail' is in 30 minutes.",
+            "text_local": "नमस्ते",
+            "audio_path": "reminders/test.wav",
+            "audio_file": "C:\\fake\\test.wav",
+            "status": "ready",
+            "error": None,
+        }
+        with mock.patch("notifier.views.prepare_reminder", return_value=fake_report):
+            response = self.client.post(f"/notifier/event/{self.due.id}/preview/")
+        self.assertContains(response, "नमस्ते")
+
+    def test_event_dispatch_uses_workflow_and_redirects(self):
+        fake_report = {
+            "confirmed": True, "due_found": 1, "dispatched": 1, "failed": 0,
+            "skipped": 0, "held_quiet_hours": 0,
+            "results": [{"status": "dispatched", "error": None}], "message": "done",
+        }
+        with mock.patch("notifier.views.dispatch_due_reminders", return_value=fake_report) as workflow:
+            response = self.client.post(f"/notifier/event/{self.due.id}/dispatch/")
+        self.assertEqual(response.status_code, 302)
+        workflow.assert_called_once_with(confirm=True, event_ids=[self.due.id])
+
+    def test_analytics_renders(self):
+        response = self.client.get("/notifier/analytics/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Response analytics")
+
+
+class SarvamCacheTests(TestCase):
+    def test_translate_uses_cache(self):
+        sarvam_service.clear_service_caches()
+        with mock.patch.object(sarvam_service, "_headers", return_value={"api-subscription-key": "k"}), \
+             mock.patch.object(
+                 sarvam_service, "_post_with_retries",
+                 return_value={"translated_text": "नमस्ते"},
+             ) as post:
+            first = sarvam_service.translate_message("Hello", "hi-IN")
+            second = sarvam_service.translate_message("Hello", "hi-IN")
+        self.assertEqual(first, "नमस्ते")
+        self.assertEqual(second, "नमस्ते")
+        post.assert_called_once(), "second identical translation must come from the cache"
+
+    def test_retries_exhausted_return_none(self):
+        with mock.patch.object(sarvam_service, "_headers", return_value={"api-subscription-key": "k"}), \
+             mock.patch(
+                 "notifier.services.sarvam_service.requests.post",
+                 side_effect=sarvam_service.requests.RequestException("boom"),
+             ) as post:
+            result = sarvam_service.translate_message("Hello", "hi-IN")
+        self.assertIsNone(result)
+        self.assertEqual(post.call_count, 3, "bounded retry: three attempts, then give up")

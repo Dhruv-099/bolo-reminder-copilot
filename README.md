@@ -4,13 +4,20 @@
 
 Bolo turns an existing Django notification system into an agent-operated copilot
 that reminds people about upcoming events **in their own language, as a voice
-message**. A staff member asks an agent: *"who's due for a reminder?"* - the
-agent lists the drafts, plays the generated Hindi / Telugu / Tamil / Marathi
-audio, waits for a confirmation, dispatches, and never double-sends.
+message** — and closes the loop: every dispatched reminder carries a
+**press-1 / press-2 confirmation** that flows back into the system.
+
+A staff member asks an agent: *"who's due for a reminder?"* — the agent lists
+the drafts, plays the generated Hindi / Telugu / Tamil / Marathi audio, waits
+for a confirmation, dispatches, never double-sends, and later answers
+*"who confirmed? who's still silent?"* from the reply data. A web dashboard
+shows the same truth: every reminder, the transcript of what was said in each
+language, the audio, and the client's reply.
 
 The existing application was not rewritten. Synapse (Custom mode) composed its
-internal workflow functions into **one MCP tool** - `dispatch_due_reminders` -
-in minutes. That tool is the only way the agent touches the system.
+internal workflow functions into one MCP tool - `dispatch_due_reminders` - in
+minutes. That tool plus five hand-added siblings are the only ways the agent
+touches the system.
 
 ---
 
@@ -23,45 +30,71 @@ teams - lose money to no-shows and missed follow-ups. Two gaps make it worse:
 2. **Operability.** Reminder tools need trained staff clicking through admin
    screens; the people who know who needs reminding are rarely those people.
 
-Bolo closes both: every person carries a `preferred_language`, and the dispatch
-workflow is a conversation, not a form.
+Bolo closes both: every person carries a `preferred_language`, and the whole
+workflow is a conversation (or one dashboard, or one cron call - your pick).
+
+## What's in the box
+
+| Surface | What it does |
+|---|---|
+| **Dashboard** (`/notifier/dashboard/`) | The dispatch table: person, event, status, **transcript in the client's language**, inline audio player, reply badge. Preview / dispatch per row or all-at-once; unsent drafts greyed; cancelled rows marked. |
+| **Live dispatch feed** | WebSocket progress events while a batch runs (Django Channels, in-memory layer; import-guarded so the workflow works without it). |
+| **Client reply page** (`/notifier/respond/<id>/`) | The press-1/press-2 loop as a page: plays the audio, two big buttons, latest reply wins. Same endpoint a real IVR or WhatsApp webhook posts into. |
+| **Analytics** (`/notifier/analytics/`) | Response rate per language - the actual proof that vernacular reminders get answered. |
+| **MCP tools** | `dispatch_due_reminders`, `add_reminder`, `reschedule_event`, `cancel_reminder`, `list_responses`, `reminder_digest`. |
+| **Management commands** | `send_notifications` (manual), `auto_dispatch` (cron-friendly; `--loop-minutes N` to keep running). |
+| **Test suite** | 46 tests, Sarvam mocked - `python manage.py test notifier` runs offline in ~3s. |
+
+The reminder lifecycle knows about quiet hours (per person, wraps midnight),
+a retry ladder (no reply after N hours → one more attempt, capped), and
+cancellation (cancelled events are never sent). Phone numbers normalize to
+E.164 on save. Translation and TTS are deduped by an in-process cache, and
+every Sarvam call retries with bounded exponential backoff.
 
 ## How it works
 
-The core of the app is a composable workflow
+The core is still one composable workflow
 (`notifier/services/reminder_dispatch.py`):
 
-1. **Find** - events whose reminder lead time has arrived and that have not
-   been dispatched
-2. **Personalize** - render each event's `message_template` (safe against odd
+1. **Find** - events whose reminder lead time has arrived, not dispatched, not
+   cancelled; plus dispatched reminders that earned a retry (no reply, window
+   elapsed, attempts left)
+2. **Hold** - anything inside its person's quiet hours is reported as held,
+   no API calls spent, nothing sent
+3. **Personalize** - render each event's `message_template` (safe against odd
    templates)
-3. **Translate** - colloquial translation via Sarvam's `mayura:v1`
+4. **Translate** - colloquial translation via Sarvam's `mayura:v1`
    (`modern-colloquial` mode), 11 languages
-4. **Voice** - Bulbul text-to-speech, saved as WAV under `media_root/reminders/`
-5. **Dispatch & log** - only on confirmation: records timestamps and audio
-   paths, idempotent (already-dispatched events are never re-sent)
+5. **Voice** - Bulbul text-to-speech, saved as WAV under `media_root/reminders/`
+6. **Dispatch & log** - only on confirmation: timestamps, audio path **and the
+   transcript actually spoken** are persisted; concurrency-safe (row lock +
+   re-check, so two parallel runs can never double-send)
 
-`notifier/services/sarvam_service.py` is failure-safe: a missing key or an
-unreachable API logs the error and returns `None`, so one bad event never
-breaks the batch.
+`notifier/services/sarvam_service.py` is failure-safe end to end: a missing key,
+an unreachable API or exhausted retries log the error and return `None`, so one
+bad event reports a per-event failure instead of breaking the batch.
 
-## The agent layer (why Synapse)
+## The agent layer
 
-Synapse CLI scanned this codebase and composed the workflow above into a
-single MCP tool:
+Six MCP tools on one FastMCP server (`dispatch_due_reminders_server.py`,
+connected via `opencode.jsonc`):
 
 ```
-dispatch_due_reminders(confirm=false, event_ids=null) -> report
+dispatch_due_reminders(confirm=false, event_ids=null)  # preview / dispatch
+add_reminder(person_name, phone_number, what, when, ...)  # conversational intake
+reschedule_event(event_id, when)   # resets send state for the new slot
+cancel_reminder(event_id)          # never sent again
+list_responses(status=null)        # confirmed / declined / pending
+reminder_digest()                 # morning round: due today, replies, retries
 ```
 
-- `confirm=false` - **preview**: drafts + audio for every due event, nothing
+- `confirm=false` **previews**: drafts + audio for every due event, nothing
   persisted. The agent structurally cannot send anything without a human yes.
-- `confirm=true` - **dispatch**: marks events, stores audio paths, skips
-  anything already sent.
-- Optional `event_ids` scopes the run ("yes, but skip Mr. Rao").
-
-Because `confirm` gates every side effect, the safety story is in the tool
-contract itself, not in prompt instructions.
+- `add_reminder` drafts a warm message template with an LLM (Token Factory's
+  OpenAI-compatible `/v2` endpoint, same SARVAM_API_KEY) when none is given -
+  and falls back to a sensible default template if the LLM is unavailable.
+- Because `confirm` gates every side effect, the safety story is in the tool
+  contract itself, not in prompt instructions.
 
 ## Quickstart
 
@@ -71,14 +104,20 @@ python -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env             # then add your SARVAM_API_KEY
 python manage.py migrate
-python create_synthetic_data.py    # 6 fictional people, 6 due events
-python manage.py send_notifications        # preview (no changes)
-python manage.py send_notifications --confirm   # actually dispatch
+python create_synthetic_data.py    # 6 fictional people, 8 events, 6 due
+python manage.py test notifier     # 46 tests, offline, no API key needed
+python manage.py runserver         # open http://127.0.0.1:8000/notifier/dashboard/
 ```
 
-The same workflow without any agent: `manage.py send_notifications` is a thin
-wrapper around `dispatch_due_reminders` - proof the app still works exactly
-as before, agent or no agent.
+From the dashboard: **Preview** a row to hear the generated audio, **Send now**
+to dispatch, then open the **client page** on that row and press 1 or 2 to
+watch the reply land. The same workflow without a browser or an agent:
+
+```bash
+python manage.py send_notifications            # preview (no changes)
+python manage.py send_notifications --confirm  # actually dispatch
+python manage.py auto_dispatch --confirm --loop-minutes 30   # cron in one process
+```
 
 ## Build the MCP server with Synapse
 
@@ -98,80 +137,64 @@ If the generated tool plan misses the schema on the custom path, first try
 different Token Factory model (`glm5.3`, `deepseekv4.1-flash-1017`), and only
 then fall back to a direct `ANTHROPIC_API_KEY`.
 
-This writes `dispatch_due_reminders_server.py` into the project root and
-prints a client config snippet. (Hosted builds - `synapse init` then
-`synapse build --custom` - work identically.)
-
-### Connect an agent (OpenCode)
-
-`opencode.jsonc` ships in this repo — open the project folder in OpenCode and
-the `bolo` server connects automatically (verify with `opencode mcp list`):
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "bolo": {
-        "type": "local",
-        "command": [".venv/Scripts/python.exe", "dispatch_due_reminders_server.py"],
-        "environment": {
-          "DJANGO_SETTINGS_MODULE": "notification_project.settings"
-        },
-        "codemode": false
-      }
-    }
-  }
-}
-```
-
-`SARVAM_API_KEY` is read from `.env` when the server starts (via
-`load_dotenv()` in settings), so it never appears in any config. The same
-server file plugs into Claude Desktop or Cursor using the snippet Synapse
-prints.
+The generated server is thin and ours to edit (per Synapse): the other five
+tools were hand-added on the same scaffold. `opencode.jsonc` connects it —
+open the project in OpenCode and the `bolo` server appears
+(verify with `opencode mcp list`). `SARVAM_API_KEY` is read from `.env` when
+the server starts (via `load_dotenv()` in settings), so it never appears in
+any config. The same server file plugs into Claude Desktop or Cursor.
 
 ## Demo script (~4 minutes)
 
 | Beat | What happens |
 |---|---|
-| 1 | `python create_synthetic_data.py` - fresh people across hi/te/ta/mr/kn/en |
-| 2 | Agent: "Who's due for a reminder?" -> tool called with `confirm=false` -> drafts in each person's language |
-| 3 | Play the generated WAVs (the payoff moment) |
-| 4 | Human: "Yes - but skip Mr. Rao" -> agent calls `confirm=true` with a scoped `event_ids` list |
-| 5 | Rerun -> "No due events found" (idempotency) |
-| 6 | Unset `SARVAM_API_KEY` -> per-event graceful failure, no crash |
+| 1 | `python create_synthetic_data.py` - fresh people across hi/te/ta/mr/kn/en, with channel preferences and quiet hours |
+| 2 | Agent: "Who's due for a reminder?" -> `confirm=false` -> drafts in each person's language |
+| 3 | Play the generated WAVs from the dashboard's inline players (the payoff moment) |
+| 4 | Human: "Yes - but skip Mr. Rao" -> `confirm=true` with a scoped `event_ids` list |
+| 5 | Dashboard rows flip to **sent** with the transcript; open one client page and press 1 -> the row flips to **confirmed** |
+| 6 | Agent: "Who's confirmed?" -> `list_responses()`; Analytics tab shows response rate per language |
+| 7 | Rerun -> "No due events found" (idempotency); unset `SARVAM_API_KEY` -> per-event graceful failure, no crash |
 
 ## Data honesty
 
 - Names, phone numbers, emails and events in `create_synthetic_data.py` are
   **fictional**. This repository has never contained personal data.
-- The translation and voice audio are **really generated** by the Sarvam API
-  during the demo.
+- Translation, voice audio and (when enabled) LLM-drafted templates are
+  **really generated** by the Sarvam API during the demo.
 - The *delivery channel* is demo-mode: the prototype records a dispatched
-  reminder package (text + audio + timestamp). Production delivery is below.
+  reminder package (text + audio + timestamp) and the client reply is captured
+  on the demo response page — through the exact endpoint an IVR or WhatsApp
+  webhook would POST into. Production delivery is below.
 
 ## Production path (not built in the prototype)
 
 - **Real phone calls:** Sarvam Voice Agents - outbound campaigns that dial
   contact lists and speak 11 languages natively, from ~INR 3/minute; rentable
-  numbers, no separate telephony account.
+  numbers, no separate telephony account. DTMF digits (the press-1/press-2)
+  POST back into the same `record_response` entry point.
 - **WhatsApp / SMS:** the dispatch package (text + audio) plugs into the
-  WhatsApp Business API or any SMS gateway without touching the workflow.
-- The composed tool does not change: only the final delivery leg does.
+  WhatsApp Business API (directly via Cloud API, or Twilio / Gupshup) or any
+  SMS gateway without touching the workflow; replies land in the same
+  response endpoint.
+- The composed tools do not change: only the final delivery leg does.
 
 ## Repository history
 
-Two commits tell the story:
+Three commits tell the story:
 
-1. `2b57543` - the original notification-to-call system (Django + Vonage
-   SMS + IVR voice webhooks), personal data scrubbed.
+1. The original notification-to-call system (Django + Vonage SMS + IVR voice
+   webhooks), personal data scrubbed.
 2. The Sarvam swap - the same app, Vonage removed, one service module and one
-   dispatch module added. `git diff` between them is the entire change; the
-   Django models, admin, templates and project shell are untouched.
+   dispatch module added.
+3. The copilot expansion - response capture (press-1/press-2), the dashboard
+   with transcripts and audio, five more agent tools, quiet hours, retry
+   ladder, cancellation, analytics, the live feed, and the test suite.
 
 ## Acknowledgements
 
-- [Sarvam AI](https://sarvam.ai) - Translate (`mayura:v1`) and Bulbul
-  text-to-speech for Indian languages.
+- [Sarvam AI](https://sarvam.ai) - Translate (`mayura:v1`), Bulbul
+  text-to-speech, and Token Factory chat for LLM-drafted templates.
 - [Synapse CLI](https://github.com/2ndbrainlabs-ai/synapse-cli) - turns
   existing code into MCP servers without a rewrite.
+- [Django Channels](https://channels.readthedocs.io) - the live dispatch feed.

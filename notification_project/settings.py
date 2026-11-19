@@ -33,12 +33,14 @@ ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 # Application definition
 
 INSTALLED_APPS = [
+    'daphne',  # must sit above staticfiles so runserver serves ASGI + WebSockets
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'channels',
     'notifier.apps.NotifierConfig',
     #'django_apscheduler'
 ]
@@ -72,6 +74,15 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'notification_project.wsgi.application'
+ASGI_APPLICATION = 'notification_project.asgi.application'
+
+# In-memory channel layer: fine for a single-process demo (runserver or the
+# MCP server). Swap in channels_redis for a multi-process deployment.
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    }
+}
 
 
 # Database

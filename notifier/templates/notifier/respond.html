@@ -1,0 +1,42 @@
+{% extends "notifier/base.html" %}
+{% block title %}Your reminder{% endblock %}
+{% block content %}
+<div class="card" style="max-width:640px;margin:0 auto;">
+    <h2 style="margin-top:0;">Hello {{ event.person.name }} 👋</h2>
+    <p class="muted">{{ event.get_event_type_display }} · {{ event.event_datetime|date:"D, d M Y, f A" }}</p>
+
+    {% if not event.voice_dispatched_at %}
+        <p class="muted">This reminder hasn't been sent yet — there is nothing to reply to.</p>
+    {% else %}
+        <p dir="auto" style="font-size:18px;">{{ event.voice_transcript_local }}</p>
+        {% if event.voice_audio_path %}
+            <audio controls preload="auto" style="width:100%;" src="/media/{{ event.voice_audio_path }}"></audio>
+        {% endif %}
+
+        {% if event.response_value == 'CONFIRMED' or event.response_value == 'DECLINED' %}
+            <p>
+                {% if event.response_value == 'CONFIRMED' %}<span class="pill confirmed">✓ you confirmed</span>
+                {% else %}<span class="pill declined">✗ you declined</span>{% endif %}
+                <span class="muted">— you can press again to change your reply.</span>
+            </p>
+        {% endif %}
+
+        <div style="display:flex;gap:12px;margin-top:16px;flex-wrap:wrap;">
+            <form method="post" action="{% url 'notifier:respond' event.id %}">
+                {% csrf_token %}
+                <input type="hidden" name="digit" value="1">
+                <button class="btn green" type="submit">✓ Yes — I'll be there (press 1)</button>
+            </form>
+            <form method="post" action="{% url 'notifier:respond' event.id %}">
+                {% csrf_token %}
+                <input type="hidden" name="digit" value="2">
+                <button class="btn danger" type="submit">✗ No — I can't make it (press 2)</button>
+            </form>
+        </div>
+        <p class="muted" style="font-size:12px;margin-top:18px;">
+            Demo stand-in for the phone keypad / WhatsApp reply — a real IVR or
+            WhatsApp webhook posts the same <code>digit</code> to this endpoint.
+        </p>
+    {% endif %}
+</div>
+{% endblock %}

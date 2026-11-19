@@ -7,7 +7,7 @@ running this script always leaves the system demo-ready. It resets existing
 demo data first.
 """
 import os
-from datetime import timedelta
+from datetime import time, timedelta
 
 import django
 
@@ -31,18 +31,47 @@ def clear_data():
 def create_people():
     """Creates fictional people across the supported reminder languages."""
     people_data = [
-        {"name": "Rahul Verma", "phone_number": "+919000000001", "email": "rahul@example.com", "preferred_language": "hi-IN"},
-        {"name": "Arjun Reddy", "phone_number": "+919000000002", "email": "arjun@example.com", "preferred_language": "te-IN"},
-        {"name": "Priya Iyer", "phone_number": "+919000000003", "email": "priya@example.com", "preferred_language": "ta-IN"},
-        {"name": "Sneha Patil", "phone_number": "+919000000004", "email": "sneha@example.com", "preferred_language": "mr-IN"},
-        {"name": "Ananya Rao", "phone_number": "+919000000005", "email": "ananya@example.com", "preferred_language": "kn-IN"},
-        {"name": "John Dsouza", "phone_number": "+919000000006", "email": "john@example.com", "preferred_language": "en-IN"},
+        {
+            "name": "Rahul Verma", "phone_number": "+919000000001", "email": "rahul@example.com",
+            "preferred_language": "hi-IN",
+            "channel_preference": Person.ChannelPreference.WHATSAPP,
+            "quiet_hours_start": time(22, 0), "quiet_hours_end": time(8, 0),
+        },
+        {
+            "name": "Arjun Reddy", "phone_number": "+919000000002", "email": "arjun@example.com",
+            "preferred_language": "te-IN",
+            "channel_preference": Person.ChannelPreference.VOICE_CALL,
+        },
+        {
+            "name": "Priya Iyer", "phone_number": "+919000000003", "email": "priya@example.com",
+            "preferred_language": "ta-IN",
+            "channel_preference": Person.ChannelPreference.WHATSAPP,
+        },
+        {
+            "name": "Sneha Patil", "phone_number": "+919000000004", "email": "sneha@example.com",
+            "preferred_language": "mr-IN",
+            "channel_preference": Person.ChannelPreference.SMS,
+            "quiet_hours_start": time(21, 0), "quiet_hours_end": time(8, 0),
+        },
+        {
+            "name": "Ananya Rao", "phone_number": "+919000000005", "email": "ananya@example.com",
+            "preferred_language": "kn-IN",
+            "channel_preference": Person.ChannelPreference.WHATSAPP,
+        },
+        {
+            "name": "John Dsouza", "phone_number": "+919000000006", "email": "john@example.com",
+            "preferred_language": "en-IN",
+            "channel_preference": Person.ChannelPreference.DEMO_PAGE,
+        },
     ]
     created_people = []
     print("Creating fictional people...")
     for data in people_data:
         person, _ = Person.objects.get_or_create(phone_number=data["phone_number"], defaults=data)
-        print(f"  Created {person.name} (reminders in {person.preferred_language})")
+        print(
+            f"  Created {person.name} (reminders in {person.preferred_language}, "
+            f"via {person.get_channel_preference_display()})"
+        )
         created_people.append(person)
     return created_people
 
@@ -112,6 +141,7 @@ def create_events(people):
             "event_datetime_delta": timedelta(minutes=90),
             "message_template": "{name}, a gentle reminder: '{details}' is due {time_left}, at {time}.",
             "details": "Quarterly report submission", "notification_lead_time_minutes": 120,
+            "recurrence": Event.Recurrence.WEEKLY,
         },
     ]
 
@@ -126,6 +156,7 @@ def create_events(people):
             message_template=data["message_template"],
             details=data.get("details", ""),
             notification_lead_time_minutes=data["notification_lead_time_minutes"],
+            recurrence=data.get("recurrence", Event.Recurrence.NONE),
         )
         print(f"  Created {data['event_type']} for {person.name} at {event_datetime.strftime('%Y-%m-%d %H:%M')}")
 

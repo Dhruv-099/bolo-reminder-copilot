@@ -1,0 +1,31 @@
+{% extends "notifier/base.html" %}
+{% block title %}Preview reminder{% endblock %}
+{% block content %}
+<div class="card">
+    <h2 style="margin-top:0;">Draft reminder — {{ event.person.name }}
+        <span class="pill scheduled">{{ report.language }}</span>
+    </h2>
+    <p class="muted">{{ event.get_event_type_display }} · {{ event.event_datetime|date:"D, d M Y, f A" }} · to {{ event.person.phone_number }}</p>
+
+    {% if report.status == 'ready' %}
+        <p><b>English draft:</b></p>
+        <p style="background:#f9fafb;border:1px solid var(--line);border-radius:8px;padding:12px;">{{ report.text_english }}</p>
+
+        <p><b>Spoken in {{ report.language }}:</b></p>
+        <p dir="auto" style="background:#f9fafb;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:17px;">{{ report.text_local }}</p>
+
+        <audio controls preload="auto" style="width:100%;" src="/media/{{ report.audio_path }}"></audio>
+        <p class="muted" style="font-size:13px;">Preview only — nothing has been sent yet.</p>
+
+        <form method="post" action="{% url 'notifier:event_dispatch' event.id %}">
+            {% csrf_token %}
+            <button class="btn green" type="submit">Confirm — send this voice reminder</button>
+            <a class="btn ghost" href="{% url 'notifier:dashboard' %}">Back to dashboard</a>
+        </form>
+    {% else %}
+        <p><span class="pill declined">{{ report.error }}</span></p>
+        <p class="muted">Sarvam call failed — check <code>SARVAM_API_KEY</code> and the logs. Nothing was sent.</p>
+        <a class="btn ghost" href="{% url 'notifier:dashboard' %}">Back to dashboard</a>
+    {% endif %}
+</div>
+{% endblock %}

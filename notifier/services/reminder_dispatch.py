@@ -18,6 +18,7 @@ from django.apps import apps as django_apps
 if not django_apps.ready:
     django.setup()
 
+from django.db import transaction
 from django.utils import timezone
 
 from notifier.models import Event
@@ -28,11 +29,77 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_LANGUAGE = "en-IN"
 
+# Channel-layer group that receives live progress events (see _emit_progress).
+PROGRESS_GROUP = "bolo.dispatch"
+
+
+def _emit_progress(payload):
+    """Push a live progress event to any connected dashboard.
+
+    Import-guarded: without Channels installed — or with no ASGI server
+    running, e.g. from the management command, cron or the MCP server —
+    this is a no-op, so the workflow behaves identically everywhere.
+    """
+    try:
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+
+        layer = get_channel_layer()
+        if layer is not None:
+            async_to_sync(layer.group_send)(
+                PROGRESS_GROUP, {"type": "dispatch.progress", "payload": payload}
+            )
+    except Exception:  # noqa: BLE001 - progress must never break a dispatch
+        logger.debug("Live progress event dropped (no channel layer).", exc_info=True)
+
 
 def find_due_events():
-    """Return reminder events that are due and not yet dispatched, soonest first."""
-    pending = Event.objects.filter(voice_dispatched_at__isnull=True).order_by("event_datetime")
+    """Return reminder events that are due, not dispatched and not cancelled, soonest first."""
+    pending = Event.objects.filter(
+        voice_dispatched_at__isnull=True, cancelled_at__isnull=True
+    ).order_by("event_datetime")
     return [event for event in pending if event.is_notification_due]
+
+
+def retry_after_minutes():
+    """Minutes to wait for a reply before re-attempting a dispatched reminder."""
+    try:
+        return max(0, int(os.getenv("BOLO_RETRY_AFTER_MINUTES", "360")))
+    except ValueError:
+        return 360
+
+
+def max_dispatch_attempts():
+    """Upper bound on dispatch attempts per reminder (the retry ladder)."""
+    try:
+        return max(1, int(os.getenv("BOLO_MAX_DISPATCH_ATTEMPTS", "2")))
+    except ValueError:
+        return 2
+
+
+def find_retry_due_events():
+    """Dispatched reminders that got no reply and are due for another attempt."""
+    cutoff = timezone.now() - timezone.timedelta(minutes=retry_after_minutes())
+    return list(
+        Event.objects.filter(
+            voice_dispatched_at__isnull=False,
+            voice_dispatched_at__lte=cutoff,
+            response_value=Event.ResponseValue.PENDING,
+            dispatch_attempts__lt=max_dispatch_attempts(),
+            cancelled_at__isnull=True,
+        ).order_by("event_datetime")
+    )
+
+
+def is_quiet_now(person, at=None):
+    """True inside the person's quiet window; supports windows that wrap midnight."""
+    if not (person.quiet_hours_start and person.quiet_hours_end):
+        return False
+    at = (at or timezone.localtime()).time()
+    start, end = person.quiet_hours_start, person.quiet_hours_end
+    if start <= end:
+        return start <= at < end
+    return at >= start or at < end
 
 
 def personalize_message(event):
@@ -122,42 +189,134 @@ def dispatch_due_reminders(confirm=False, event_ids=None):
     dispatch timestamp and audio path — and it is idempotent: already
     dispatched events are never re-sent. Pass event_ids to scope the run.
     """
-    due_events = find_due_events()
+    due_events = [(event, False) for event in find_due_events()]
+    due_events += [(event, True) for event in find_retry_due_events()]
     if event_ids:
         try:
             wanted = {int(event_id) for event_id in event_ids}
         except (TypeError, ValueError):
             wanted = set()
-        due_events = [event for event in due_events if event.id in wanted]
+        due_events = [pair for pair in due_events if pair[0].id in wanted]
+
+    _emit_progress({"phase": "start", "confirm": bool(confirm), "due": len(due_events)})
 
     results = []
-    for event in due_events:
+    for event, is_retry in due_events:
+        if is_quiet_now(event.person):
+            # Respect quiet hours: draft nothing, send nothing. The event
+            # simply stays due until its person's window opens.
+            results.append(
+                {
+                    "event_id": event.id,
+                    "person": event.person.name,
+                    "event_type": event.get_event_type_display(),
+                    "event_datetime": timezone.localtime(event.event_datetime).isoformat(),
+                    "language": event.person.preferred_language,
+                    "text_english": "",
+                    "text_local": None,
+                    "audio_path": None,
+                    "audio_file": None,
+                    "status": "held_quiet_hours",
+                    "error": None,
+                    "retry": is_retry,
+                }
+            )
+            _emit_progress(
+                {
+                    "phase": "event",
+                    "event_id": event.id,
+                    "person": event.person.name,
+                    "language": event.person.preferred_language,
+                    "status": "held_quiet_hours",
+                }
+            )
+            continue
+
         report = prepare_reminder(event)
+        report["retry"] = is_retry
         if confirm and report["status"] == "ready":
-            event.voice_dispatched_at = timezone.now()
-            event.voice_audio_path = report["audio_path"]
-            event.save(update_fields=["voice_dispatched_at", "voice_audio_path"])
-            report["status"] = "dispatched"
+            # Re-check under a row lock so two concurrent runs can never
+            # double-send the same event. We compare against the in-memory
+            # snapshot taken when the run was built: for fresh events a new
+            # voice_dispatched_at means another run won the race; for retry
+            # events the timestamp is legitimately set, so a changed attempt
+            # count is the race signal. The lock is held only for the quick
+            # write, not for the slow translate/voice calls above.
+            # (SQLite ignores the row lock but serializes writes itself,
+            # so the re-check still holds; Postgres gets true locking.)
+            with transaction.atomic():
+                locked = Event.objects.select_for_update().get(pk=event.pk)
+                if (
+                    locked.voice_dispatched_at != event.voice_dispatched_at
+                    or locked.dispatch_attempts != event.dispatch_attempts
+                ):
+                    report["status"] = "skipped"
+                    report["error"] = "already_dispatched_concurrently"
+                else:
+                    locked.voice_dispatched_at = timezone.now()
+                    locked.voice_audio_path = report["audio_path"]
+                    locked.voice_transcript_english = report["text_english"]
+                    locked.voice_transcript_local = report["text_local"]
+                    locked.dispatch_attempts += 1
+                    locked.save(
+                        update_fields=[
+                            "voice_dispatched_at",
+                            "voice_audio_path",
+                            "voice_transcript_english",
+                            "voice_transcript_local",
+                            "dispatch_attempts",
+                        ]
+                    )
+                    report["status"] = "dispatched"
         results.append(report)
+        _emit_progress(
+            {
+                "phase": "event",
+                "event_id": event.id,
+                "person": event.person.name,
+                "language": event.person.preferred_language,
+                "status": report["status"],
+            }
+        )
 
     dispatched = sum(1 for item in results if item["status"] == "dispatched")
     failed = sum(1 for item in results if item["status"] == "error")
+    skipped = sum(1 for item in results if item["status"] == "skipped")
+    held = sum(1 for item in results if item["status"] == "held_quiet_hours")
 
     if not results:
         message = "No due events found."
     elif confirm:
         message = f"Dispatch complete: {dispatched} sent, {failed} failed."
+        if skipped:
+            message += f" {skipped} skipped (already dispatched by another run)."
+        if held:
+            message += f" {held} held back (quiet hours)."
     else:
-        message = (
-            f"Preview: {len(results)} due, {failed} failed. "
-            "Nothing was sent — call again with confirm=true to dispatch."
-        )
+        message = f"Preview: {len(results)} due, {failed} failed."
+        if held:
+            message += f" {held} held back (quiet hours)."
+        message += " Nothing was sent — call again with confirm=true to dispatch."
+
+    _emit_progress(
+        {
+            "phase": "done",
+            "summary": message,
+            "confirmed": bool(confirm),
+            "dispatched": dispatched,
+            "failed": failed,
+            "skipped": skipped,
+            "held": held,
+        }
+    )
 
     return {
         "confirmed": bool(confirm),
         "due_found": len(results),
         "dispatched": dispatched,
         "failed": failed,
+        "skipped": skipped,
+        "held_quiet_hours": held,
         "results": results,
         "message": message,
     }
@@ -168,11 +327,19 @@ def render_report(report):
     lines = [
         f"Reminder dispatch - confirm={report.get('confirmed')}, "
         f"due={report.get('due_found', 0)}, dispatched={report.get('dispatched', 0)}, "
-        f"failed={report.get('failed', 0)}"
+        f"failed={report.get('failed', 0)}, skipped={report.get('skipped', 0)}, "
+        f"held={report.get('held_quiet_hours', 0)}"
     ]
     for item in report.get("results", []):
+        retry_note = " (retry)" if item.get("retry") else ""
+        if item.get("status") == "held_quiet_hours":
+            lines.append(
+                f"[held{retry_note}] #{item['event_id']} {item['person']} - {item['event_type']} "
+                f"({item['language']}): inside quiet hours, not sent"
+            )
+            continue
         lines.append(
-            f"[{item['status']}] #{item['event_id']} {item['person']} - {item['event_type']} "
+            f"[{item['status']}{retry_note}] #{item['event_id']} {item['person']} - {item['event_type']} "
             f"({item['language']}): {item.get('text_local') or item.get('text_english')}"
         )
         if item.get("audio_file"):

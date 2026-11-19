@@ -1,0 +1,50 @@
+{% extends "notifier/base.html" %}
+{% block title %}Analytics{% endblock %}
+{% block content %}
+<h2 style="margin-top:0;">Response analytics</h2>
+<p class="muted">
+    Do multilingual voice reminders actually get answered? Everything below is
+    computed live from the dispatch table — sent, replied, confirmed.
+</p>
+
+<div class="statgrid" style="margin-bottom:20px;">
+    <div class="stat"><b>{{ totals.dispatched }}</b><span>voice reminders sent</span></div>
+    <div class="stat"><b>{{ replied_total }}</b><span>replies received</span></div>
+    <div class="stat"><b>{{ response_rate }}%</b><span>overall response rate</span></div>
+    <div class="stat"><b>{{ totals.confirmed }}</b><span>confirmed (press 1)</span></div>
+    <div class="stat"><b>{{ totals.declined }}</b><span>declined (press 2)</span></div>
+    <div class="stat"><b>{{ totals.pending }}</b><span>still awaiting reply</span></div>
+</div>
+
+<div class="card" style="padding:0;overflow-x:auto;">
+<table>
+    <thead>
+        <tr>
+            <th>Language</th>
+            <th>Sent</th>
+            <th>Confirmed</th>
+            <th>Declined</th>
+            <th>Awaiting reply</th>
+            <th>Response rate</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for row in languages %}
+        <tr>
+            <td><b>{{ row.language }}</b></td>
+            <td>{{ row.dispatched }}</td>
+            <td>{{ row.confirmed }}</td>
+            <td>{{ row.declined }}</td>
+            <td>{{ row.pending }}</td>
+            <td><span class="pill {% if row.response_rate >= 50 %}confirmed{% elif row.response_rate > 0 %}due{% else %}scheduled{% endif %}">{{ row.response_rate }}%</span></td>
+        </tr>
+    {% empty %}
+        <tr><td colspan="6" class="muted">
+            No dispatched reminders yet — run a dispatch from the
+            <a href="{% url 'notifier:dashboard' %}">dashboard</a> (or <code>python manage.py send_notifications --confirm</code>).
+        </td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endblock %}

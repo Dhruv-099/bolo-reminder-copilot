@@ -1,0 +1,156 @@
+{% extends "notifier/base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="statgrid">
+    <div class="stat"><b>{{ stats.due }}</b><span>due now</span></div>
+    <div class="stat"><b>{{ stats.sent }}</b><span>voice reminders sent</span></div>
+    <div class="stat"><b>{{ stats.awaiting }}</b><span>awaiting reply</span></div>
+    <div class="stat"><b>{{ stats.confirmed }}</b><span>confirmed (press 1)</span></div>
+    <div class="stat"><b>{{ stats.declined }}</b><span>declined (press 2)</span></div>
+    <div class="stat"><b>{{ stats.scheduled }}</b><span>not due yet</span></div>
+</div>
+
+{% if stats.due %}
+<form method="post" action="{% url 'notifier:dispatch_all_due' %}" style="margin:20px 0;">
+    {% csrf_token %}
+    <button class="btn" type="submit">Dispatch all {{ stats.due }} due now</button>
+    <span class="muted" style="font-size:13px;margin-left:10px;">runs translate → voice per person; a few seconds each</span>
+</form>
+{% endif %}
+
+<div class="card" id="live-feed-card" style="display:none;">
+    <h3 style="margin-top:0;margin-bottom:8px;">
+        Live dispatch feed
+        <span class="pill confirmed" id="live-dot" style="display:none;">live</span>
+    </h3>
+    <ul id="live-feed" class="muted" style="font-size:13px;max-height:200px;overflow-y:auto;margin:0;padding-left:18px;"></ul>
+</div>
+<script>
+(function () {
+    var feed = document.getElementById("live-feed");
+    var card = document.getElementById("live-feed-card");
+    var dot = document.getElementById("live-dot");
+    function line(text) {
+        var li = document.createElement("li");
+        li.textContent = text;
+        feed.appendChild(li);
+        feed.scrollTop = feed.scrollHeight;
+    }
+    try {
+        var proto = location.protocol === "https:" ? "wss://" : "ws://";
+        var socket = new WebSocket(proto + location.host + "/ws/dispatch/");
+        socket.onopen = function () {
+            card.style.display = "block";
+            dot.style.display = "inline-block";
+        };
+        socket.onmessage = function (msg) {
+            var data = JSON.parse(msg.data);
+            if (data.phase === "start") {
+                line("Run started (confirm=" + data.confirm + "): " + data.due + " due.");
+            } else if (data.phase === "event") {
+                line("#" + data.event_id + " " + data.person + " (" + data.language + "): " + data.status);
+            } else if (data.phase === "done") {
+                line("Done — " + data.summary);
+                setTimeout(function () { location.reload(); }, 1800);
+            }
+        };
+        socket.onclose = function () { dot.style.display = "none"; };
+    } catch (err) {
+        /* WebSocket unavailable — the dashboard works fine without the live feed. */
+    }
+})();
+</script>
+
+<div class="card" style="padding:0;overflow-x:auto;">
+<table>
+    <thead>
+        <tr>
+            <th>Person</th>
+            <th>Event</th>
+            <th>Status</th>
+            <th>Transcript (what they heard)</th>
+            <th>Audio</th>
+            <th>Client reply</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+        <tr class="{% if row.status != 'sent' %}dim{% endif %}">
+            <td>
+                <b>{{ row.event.person.name }}</b><br>
+                <span class="muted">{{ row.event.person.phone_number }}</span>
+                <span class="pill scheduled">{{ row.event.person.get_preferred_language_display }}</span>
+            </td>
+            <td>
+                {{ row.event.get_event_type_display }}<br>
+                <span class="muted">{{ row.event.event_datetime|date:"D, d M Y, f A" }}</span>
+                {% if row.event.recurrence != 'NONE' %}<br><span class="muted" style="font-size:12px;">repeats {{ row.event.get_recurrence_display|lower }}</span>{% endif %}
+            </td>
+            <td>
+                {% if row.status == 'cancelled' %}
+                    <span class="pill cancelled">✗ cancelled</span>
+                {% elif row.status == 'sent' %}
+                    <span class="pill sent">sent</span><br>
+                    <span class="muted" style="font-size:12px;">{{ row.event.voice_dispatched_at|date:"d M, f A" }}</span>
+                {% elif row.status == 'due' %}
+                    <span class="pill due">due now</span>
+                {% else %}
+                    <span class="pill scheduled">scheduled</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if row.status == 'sent' %}
+                    <div dir="auto">{{ row.event.voice_transcript_local }}</div>
+                    <div class="muted" style="font-size:12px;margin-top:4px;">EN: {{ row.event.voice_transcript_english }}</div>
+                {% else %}
+                    <span class="muted">—</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if row.status == 'sent' and row.event.voice_audio_path %}
+                    <audio controls preload="none" src="/media/{{ row.event.voice_audio_path }}"></audio>
+                {% else %}
+                    <span class="muted">—</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if row.status != 'sent' %}
+                    <span class="muted">—</span>
+                {% elif row.event.response_value == 'CONFIRMED' %}
+                    <span class="pill confirmed">✓ confirmed</span>
+                {% elif row.event.response_value == 'DECLINED' %}
+                    <span class="pill declined">✗ declined</span>
+                {% else %}
+                    <span class="pill pending">awaiting reply</span>
+                {% endif %}
+                {% if row.status == 'sent' and row.event.response_received_at %}
+                    <div class="muted" style="font-size:12px;">{{ row.event.response_received_at|date:"d M, f A" }} · {{ row.event.response_channel }}</div>
+                {% elif row.status == 'sent' %}
+                    <a class="muted" style="font-size:12px;" href="{% url 'notifier:respond' row.event.id %}">open client page →</a>
+                {% endif %}
+            </td>
+            <td>
+                {% if row.status == 'due' %}
+                    <form method="post" action="{% url 'notifier:event_preview' row.event.id %}" style="display:inline;">
+                        {% csrf_token %}<button class="btn ghost" type="submit">Preview</button>
+                    </form>
+                    <form method="post" action="{% url 'notifier:event_dispatch' row.event.id %}" style="display:inline;">
+                        {% csrf_token %}<button class="btn" type="submit">Send now</button>
+                    </form>
+                {% elif row.status == 'sent' %}
+                    <a class="btn ghost" href="{% url 'notifier:respond' row.event.id %}">client page</a>
+                {% elif row.status == 'cancelled' %}
+                    <span class="muted" style="font-size:12px;">cancelled</span>
+                {% else %}
+                    <span class="muted" style="font-size:12px;">waits for lead time</span>
+                {% endif %}
+            </td>
+        </tr>
+    {% empty %}
+        <tr><td colspan="7" class="muted">No events yet — run <code>python create_synthetic_data.py</code> to seed the demo.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endblock %}
