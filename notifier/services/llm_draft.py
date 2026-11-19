@@ -54,7 +54,14 @@ def draft_message_template(event_type, details, model=None):
             }
         ],
         "temperature": 0.7,
-        "max_tokens": 120,
+        # sarvam-105b thinks by default, and reasoning tokens count against
+        # max_tokens — a small budget gets consumed entirely by reasoning
+        # (finish_reason "length", empty content, failed draft). Drafting
+        # doesn't need thinking, so switch it off (105b accepts "none").
+        # Models that cannot (glm5.3, kimi) need this unset and a bigger
+        # max_tokens instead.
+        "reasoning_effort": os.getenv("SARVAM_LLM_REASONING", "none"),
+        "max_tokens": 1024,
     }
     try:
         response = requests.post(CHAT_URL, json=payload, headers=headers, timeout=30)
