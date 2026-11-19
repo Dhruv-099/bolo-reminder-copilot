@@ -27,7 +27,22 @@ SECRET_KEY = 'django-insecure-bm8l&(&3$4w@qgh5dv*(c%yx!ao_(&133$rby8trag3pbmnf+k
 
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+# Hosts the site may be served from (comma-separated env list), e.g.
+#   ALLOWED_HOSTS=git.bobalhouse.co.in,203.0.113.10
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+    if host.strip()
+]
+
+# Needed when forms are POSTed from another origin/scheme (typically an
+# HTTPS reverse proxy in front of the app): same hosts, with scheme, e.g.
+#   CSRF_TRUSTED_ORIGINS=https://git.bobalhouse.co.in
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',')
+    if origin.strip()
+]
 
 
 # Application definition
