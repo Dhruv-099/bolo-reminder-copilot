@@ -1,6 +1,12 @@
 # notifier/views.py
+import hmac
+import json
+import os
+
 from django.contrib import messages
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from notifier.models import LANGUAGES, Event, Person
@@ -116,6 +122,66 @@ def respond(request, event_id):
             messages.error(request, result["message"])
         return redirect("notifier:respond", event_id=event.id)
     return render(request, "notifier/respond.html", {"event": event})
+
+
+def _webhook_token(request):
+    """Extract the caller's webhook token from Bearer / X-Api-Key / params."""
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (
+        request.headers.get("X-Api-Key", "")
+        or request.POST.get("token", "")
+        or request.GET.get("token", "")
+    )
+
+
+@csrf_exempt
+@require_POST
+def response_webhook(request):
+    """Inbound replies from real channels: IVR DTMF digits, WhatsApp bots.
+
+    Auth: the BOLO_WEBHOOK_TOKEN env value as a Bearer token or X-Api-Key
+    header (or `token` parameter). The endpoint stays disabled (403) until
+    that variable is set, so nothing is ever open by accident.
+
+    Body (JSON or form-encoded): {"event_id": 123, "digit": "1"|"2",
+    "channel": "ivr"} - the same record_response entry point the demo
+    respond page uses.
+    """
+    expected = os.getenv("BOLO_WEBHOOK_TOKEN", "")
+    if not expected:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "webhook_disabled",
+                "message": "Set BOLO_WEBHOOK_TOKEN in the environment to enable this endpoint.",
+            },
+            status=403,
+        )
+    if not hmac.compare_digest(str(expected), str(_webhook_token(request))):
+        return JsonResponse({"ok": False, "error": "unauthorized"}, status=401)
+
+    if request.content_type == "application/json":
+        try:
+            data = json.loads(request.body.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return JsonResponse({"ok": False, "error": "invalid_json"}, status=400)
+    else:
+        data = request.POST
+
+    try:
+        event_id = int(data.get("event_id"))
+    except (TypeError, ValueError):
+        return JsonResponse(
+            {"ok": False, "error": "invalid_event_id",
+             "message": "Body needs an integer event_id."},
+            status=400,
+        )
+
+    channel = str(data.get("channel") or "webhook").strip()[:20] or "webhook"
+    result = record_response(event_id, data.get("digit", ""), channel=channel)
+    return JsonResponse(result, status=200 if result["ok"] else 400)
 
 
 def analytics(request):

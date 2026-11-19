@@ -43,13 +43,21 @@ workflow is a conversation (or one dashboard, or one cron call - your pick).
 | **Analytics** (`/notifier/analytics/`) | Response rate per language - the actual proof that vernacular reminders get answered. |
 | **MCP tools** | `dispatch_due_reminders`, `add_reminder`, `reschedule_event`, `cancel_reminder`, `list_responses`, `reminder_digest`. |
 | **Management commands** | `send_notifications` (manual), `auto_dispatch` (cron-friendly; `--loop-minutes N` to keep running). |
-| **Test suite** | 46 tests, Sarvam mocked - `python manage.py test notifier` runs offline in ~3s. |
+| **Reply webhook** | `POST /notifier/webhook/response/` — token-authenticated (Bearer / X-Api-Key, `BOLO_WEBHOOK_TOKEN`), CSRF-exempt endpoint that a real IVR or WhatsApp bridge posts `{"event_id", "digit", "channel"}` into. Disabled (403) until the token is set. |
+| **DevOps** | `Dockerfile` + `docker-compose.yml` (migrations on start, media volume), GitHub Actions CI (system check, migration check, full test suite — runs offline, no API key). |
+| **Test suite** | 62 tests, Sarvam mocked - `python manage.py test notifier` runs offline in ~4s. |
 
 The reminder lifecycle knows about quiet hours (per person, wraps midnight),
-a retry ladder (no reply after N hours → one more attempt, capped), and
-cancellation (cancelled events are never sent). Phone numbers normalize to
-E.164 on save. Translation and TTS are deduped by an in-process cache, and
-every Sarvam call retries with bounded exponential backoff.
+a retry ladder (no reply after N hours → one more attempt, capped),
+cancellation (cancelled events are never sent) and **recurring events** —
+dispatching a daily/weekly/monthly reminder automatically schedules its next
+occurrence, idempotently, chained to the root event. Dispatch routes each
+package by the person's **channel preference** (WhatsApp / voice call / SMS /
+demo page) through `notifier/services/delivery.py`; real channel senders plug
+in there, and until they do each falls back to the recorded demo package with
+a clear status. Phone numbers normalize to E.164 on save. Translation and TTS
+are deduped by an in-process cache, and every Sarvam call retries with bounded
+exponential backoff.
 
 ## How it works
 
@@ -105,8 +113,15 @@ pip install -r requirements.txt
 copy .env.example .env             # then add your SARVAM_API_KEY
 python manage.py migrate
 python create_synthetic_data.py    # 6 fictional people, 8 events, 6 due
-python manage.py test notifier     # 46 tests, offline, no API key needed
+python manage.py test notifier     # 62 tests, offline, no API key needed
 python manage.py runserver         # open http://127.0.0.1:8000/notifier/dashboard/
+```
+
+Or with Docker (image runs migrations on start):
+
+```bash
+echo SARVAM_API_KEY=... > .env
+docker compose up                  # dashboard on http://127.0.0.1:8000/notifier/dashboard/
 ```
 
 From the dashboard: **Preview** a row to hear the generated audio, **Send now**
@@ -172,16 +187,17 @@ any config. The same server file plugs into Claude Desktop or Cursor.
 - **Real phone calls:** Sarvam Voice Agents - outbound campaigns that dial
   contact lists and speak 11 languages natively, from ~INR 3/minute; rentable
   numbers, no separate telephony account. DTMF digits (the press-1/press-2)
-  POST back into the same `record_response` entry point.
+  POST back into `POST /notifier/webhook/response/` (set `BOLO_WEBHOOK_TOKEN`)
+  - the same `record_response` entry point the demo page uses.
 - **WhatsApp / SMS:** the dispatch package (text + audio) plugs into the
   WhatsApp Business API (directly via Cloud API, or Twilio / Gupshup) or any
-  SMS gateway without touching the workflow; replies land in the same
-  response endpoint.
+  SMS gateway; delivery branches on each person's `channel_preference` via
+  `notifier/services/delivery.py`, and replies land in the same webhook.
 - The composed tools do not change: only the final delivery leg does.
 
 ## Repository history
 
-Three commits tell the story:
+The history tells the story in stages:
 
 1. The original notification-to-call system (Django + Vonage SMS + IVR voice
    webhooks), personal data scrubbed.
@@ -189,7 +205,9 @@ Three commits tell the story:
    dispatch module added.
 3. The copilot expansion - response capture (press-1/press-2), the dashboard
    with transcripts and audio, five more agent tools, quiet hours, retry
-   ladder, cancellation, analytics, the live feed, and the test suite.
+   ladder, cancellation, recurring-event spawning, channel-preference
+   delivery routing, the reply webhook, analytics, the live feed, the test
+   suite, Docker and CI.
 
 ## Acknowledgements
 

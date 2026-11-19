@@ -11,4 +11,5 @@ urlpatterns = [
     path('dispatch-all/', views.dispatch_all_due, name='dispatch_all_due'),
     path('respond/<int:event_id>/', views.respond, name='respond'),
     path('analytics/', views.analytics, name='analytics'),
+    path('webhook/response/', views.response_webhook, name='response_webhook'),
 ]

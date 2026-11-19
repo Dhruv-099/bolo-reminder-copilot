@@ -81,6 +81,7 @@
                 <b>{{ row.event.person.name }}</b><br>
                 <span class="muted">{{ row.event.person.phone_number }}</span>
                 <span class="pill scheduled">{{ row.event.person.get_preferred_language_display }}</span>
+                <span class="muted" style="font-size:12px;">· {{ row.event.person.get_channel_preference_display }}</span>
             </td>
             <td>
                 {{ row.event.get_event_type_display }}<br>

@@ -5,6 +5,8 @@ Sarvam is mocked everywhere, so the suite runs offline and fast. Run with:
     python manage.py test notifier
 """
 
+import json
+import os
 from datetime import datetime, time, timedelta
 from unittest import mock
 
@@ -12,13 +14,14 @@ from django.test import Client, TestCase
 from django.utils import timezone
 
 from notifier.models import Event, Person
-from notifier.services import agent_tools, sarvam_service
+from notifier.services import agent_tools, delivery, sarvam_service
 from notifier.services.reminder_dispatch import (
     dispatch_due_reminders,
     find_due_events,
     find_retry_due_events,
     is_quiet_now,
     personalize_message,
+    spawn_next_occurrence,
 )
 from notifier.services.responses import record_response
 
@@ -513,3 +516,177 @@ class SarvamCacheTests(TestCase):
             result = sarvam_service.translate_message("Hello", "hi-IN")
         self.assertIsNone(result)
         self.assertEqual(post.call_count, 3, "bounded retry: three attempts, then give up")
+
+
+class RecurrenceTests(SarvamMockMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.person = make_person()
+
+    def test_daily_dispatch_spawns_next_occurrence(self):
+        event = make_event(self.person, recurrence=Event.Recurrence.DAILY)
+        report = dispatch_due_reminders(confirm=True)
+        item = report["results"][0]
+        self.assertEqual(item["status"], "dispatched")
+        spawned = Event.objects.get(pk=item["spawned_next_id"])
+        self.assertEqual(spawned.recurrence_parent_id, event.id, "occurrences chain to the root event")
+        self.assertEqual(spawned.event_datetime - event.event_datetime, timedelta(days=1))
+        self.assertEqual(spawned.message_template, event.message_template)
+        self.assertEqual(spawned.dispatch_attempts, 0)
+        self.assertFalse(spawned.is_notification_due, "next occurrence must respect its own lead time")
+
+    def test_spawn_is_idempotent(self):
+        event = make_event(self.person, recurrence=Event.Recurrence.WEEKLY)
+        first = spawn_next_occurrence(event)
+        second = spawn_next_occurrence(event)
+        self.assertIsNotNone(first)
+        self.assertIsNone(second, "the same slot must never spawn twice")
+
+    def test_monthly_clamps_month_end(self):
+        jan31 = timezone.make_aware(datetime(2026, 1, 31, 16, 0), timezone.get_current_timezone())
+        event = make_event(self.person, event_datetime=jan31, recurrence=Event.Recurrence.MONTHLY)
+        spawned = spawn_next_occurrence(event)
+        self.assertEqual(
+            (spawned.event_datetime.year, spawned.event_datetime.month, spawned.event_datetime.day),
+            (2026, 2, 28),
+            "Jan 31 monthly must clamp to Feb 28",
+        )
+
+    def test_non_recurring_does_not_spawn(self):
+        make_event(self.person)
+        report = dispatch_due_reminders(confirm=True)
+        self.assertNotIn("spawned_next_id", report["results"][0])
+        self.assertEqual(Event.objects.count(), 1)
+
+
+class DeliveryBranchTests(SarvamMockMixin, TestCase):
+    def _dispatch_one(self, person):
+        make_event(person)
+        return dispatch_due_reminders(confirm=True)["results"][0]
+
+    def test_demo_page_delivery_is_recorded(self):
+        person = make_person(channel_preference=Person.ChannelPreference.DEMO_PAGE)
+        delivery_info = self._dispatch_one(person)["delivery"]
+        self.assertEqual(delivery_info["via"], "demo_page")
+        self.assertEqual(delivery_info["mode"], "recorded")
+
+    def test_whatsapp_without_credentials_falls_back(self):
+        person = make_person(
+            phone="+919000000011", channel_preference=Person.ChannelPreference.WHATSAPP
+        )
+        with mock.patch.object(delivery, "_whatsapp_configured", return_value=False):
+            delivery_info = self._dispatch_one(person)["delivery"]
+        self.assertEqual(delivery_info["via"], "whatsapp")
+        self.assertEqual(delivery_info["mode"], "recorded_fallback:whatsapp")
+
+    def test_whatsapp_with_credentials_marks_pending_real_send(self):
+        person = make_person(
+            phone="+919000000012", channel_preference=Person.ChannelPreference.WHATSAPP
+        )
+        with mock.patch.object(delivery, "_whatsapp_configured", return_value=True):
+            delivery_info = self._dispatch_one(person)["delivery"]
+        self.assertEqual(delivery_info["mode"], "recorded_pending_real_send")
+
+    def test_voice_call_and_sms_fall_back(self):
+        for pref, via in (
+            (Person.ChannelPreference.VOICE_CALL, "voice_call"),
+            (Person.ChannelPreference.SMS, "sms"),
+        ):
+            person = make_person(
+                phone=f"+91900000001{int(pref == Person.ChannelPreference.SMS)}",
+                channel_preference=pref,
+            )
+            delivery_info = self._dispatch_one(person)["delivery"]
+            self.assertEqual(delivery_info["via"], via)
+            self.assertEqual(delivery_info["mode"], f"recorded_fallback:{via}")
+
+    def test_handler_failure_never_breaks_dispatch(self):
+        person = make_person(
+            phone="+919000000013", channel_preference=Person.ChannelPreference.DEMO_PAGE
+        )
+
+        def boom(event, package):
+            raise RuntimeError("channel exploded")
+
+        with mock.patch.object(delivery, "CHANNEL_HANDLERS", {Person.ChannelPreference.DEMO_PAGE: boom}):
+            item = self._dispatch_one(person)
+        self.assertEqual(item["status"], "dispatched", "a channel failure must not undo the dispatch")
+        self.assertEqual(item["delivery"]["mode"], "error")
+
+
+class ResponseWebhookTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.person = make_person()
+        self.event = make_event(self.person, voice_dispatched_at=timezone.now())
+        self.env = mock.patch.dict(os.environ, {"BOLO_WEBHOOK_TOKEN": "sekrit-token"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def post_json(self, payload, **headers):
+        return self.client.post(
+            "/notifier/webhook/response/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **headers,
+        )
+
+    def test_bearer_token_records_reply(self):
+        response = self.post_json(
+            {"event_id": self.event.id, "digit": "1", "channel": "ivr"},
+            HTTP_AUTHORIZATION="Bearer sekrit-token",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.CONFIRMED)
+        self.assertEqual(self.event.response_channel, "ivr")
+
+    def test_x_api_key_header(self):
+        response = self.post_json(
+            {"event_id": self.event.id, "digit": "2"},
+            HTTP_X_API_KEY="sekrit-token",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.DECLINED)
+        self.assertEqual(self.event.response_channel, "webhook", "channel defaults when not given")
+
+    def test_wrong_token_is_unauthorized(self):
+        response = self.post_json(
+            {"event_id": self.event.id, "digit": "1"},
+            HTTP_AUTHORIZATION="Bearer nope",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.PENDING)
+
+    def test_disabled_without_env_token(self):
+        os.environ.pop("BOLO_WEBHOOK_TOKEN", None)
+        try:
+            response = self.post_json({"event_id": self.event.id, "digit": "1"})
+        finally:
+            os.environ["BOLO_WEBHOOK_TOKEN"] = "sekrit-token"
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "webhook_disabled")
+
+    def test_form_encoded_body_with_token_param(self):
+        response = self.client.post(
+            "/notifier/webhook/response/",
+            data={"event_id": self.event.id, "digit": "1", "token": "sekrit-token"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.CONFIRMED)
+
+    def test_invalid_digit_is_reported(self):
+        response = self.post_json(
+            {"event_id": self.event.id, "digit": "9"},
+            HTTP_AUTHORIZATION="Bearer sekrit-token",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_digit")
+
+    def test_missing_event_id_rejected(self):
+        response = self.post_json({"digit": "1"}, HTTP_AUTHORIZATION="Bearer sekrit-token")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_event_id")

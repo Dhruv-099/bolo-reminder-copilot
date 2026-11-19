@@ -6,6 +6,7 @@ bootstraps Django, so it works from the management command, a plain script,
 or the Synapse-generated MCP server without a running web server.
 """
 
+import calendar
 import logging
 import os
 import re
@@ -22,7 +23,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from notifier.models import Event
-from notifier.services import sarvam_service
+from notifier.services import delivery, sarvam_service
 from notifier.utils import format_time_left
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,45 @@ def is_quiet_now(person, at=None):
     if start <= end:
         return start <= at < end
     return at >= start or at < end
+
+
+def _advance_datetime(dt, recurrence):
+    """Next occurrence datetime for a recurrence rule (month-end clamped)."""
+    if recurrence == Event.Recurrence.DAILY:
+        return dt + timezone.timedelta(days=1)
+    if recurrence == Event.Recurrence.WEEKLY:
+        return dt + timezone.timedelta(weeks=1)
+    if recurrence == Event.Recurrence.MONTHLY:
+        year = dt.year + (dt.month == 12)
+        month = (dt.month % 12) + 1
+        day = min(dt.day, calendar.monthrange(year, month)[1])
+        return dt.replace(year=year, month=month, day=day)
+    return dt
+
+
+def spawn_next_occurrence(event):
+    """Create the next occurrence of a recurring event. Idempotent.
+
+    Occurrences are keyed on (recurrence_parent, event_datetime), so a retry
+    or a double dispatch can never duplicate the chain. Returns the new
+    Event, or None when there is nothing to spawn (or it already exists).
+    """
+    if event.recurrence == Event.Recurrence.NONE:
+        return None
+    next_dt = _advance_datetime(event.event_datetime, event.recurrence)
+    parent = event.recurrence_parent or event
+    if Event.objects.filter(recurrence_parent=parent, event_datetime=next_dt).exists():
+        return None
+    return Event.objects.create(
+        person=event.person,
+        event_type=event.event_type,
+        event_datetime=next_dt,
+        message_template=event.message_template,
+        details=event.details,
+        notification_lead_time_minutes=event.notification_lead_time_minutes,
+        recurrence=event.recurrence,
+        recurrence_parent=parent,
+    )
 
 
 def personalize_message(event):
@@ -268,6 +308,17 @@ def dispatch_due_reminders(confirm=False, event_ids=None):
                         ]
                     )
                     report["status"] = "dispatched"
+                    if locked.recurrence != Event.Recurrence.NONE:
+                        # A recurring reminder keeps its chain alive: the
+                        # next occurrence is scheduled as soon as this one
+                        # goes out (idempotently - see spawn_next_occurrence).
+                        spawned = spawn_next_occurrence(locked)
+                        if spawned:
+                            report["spawned_next_id"] = spawned.id
+                            report["spawned_next_at"] = (
+                                timezone.localtime(spawned.event_datetime).isoformat()
+                            )
+                    report["delivery"] = delivery.deliver(locked, report)
         results.append(report)
         _emit_progress(
             {
@@ -342,6 +393,16 @@ def render_report(report):
             f"[{item['status']}{retry_note}] #{item['event_id']} {item['person']} - {item['event_type']} "
             f"({item['language']}): {item.get('text_local') or item.get('text_english')}"
         )
+        if item.get("delivery"):
+            delivery_info = item["delivery"]
+            lines.append(
+                f"    delivery: {delivery_info.get('via')} ({delivery_info.get('mode')})"
+            )
+        if item.get("spawned_next_id"):
+            lines.append(
+                f"    next occurrence: #{item['spawned_next_id']} "
+                f"at {item.get('spawned_next_at')}"
+            )
         if item.get("audio_file"):
             lines.append(f"    audio: {item['audio_file']}")
         if item.get("error"):
