@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project_name }}</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; line-height: 1.6; }
+        h1 { color: #333; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 3px;}
+    </style>
+</head>
+<body>
+    <h1>Welcome to the {{ project_name }}!</h1>
+    <p>{{ description }}</p>
+    <p>
+        The primary way to manage data for this system is through the
+        <a href="{% url 'admin:index' %}">Django Admin Interface</a>.
+    </p>
+    <p>
+        The application listens for webhooks from Vonage at paths like
+        <code>/notifier/vonage/answer/</code> and <code>/notifier/vonage/dtmf_event/</code>.
+        These are not intended for direct browser access.
+    </p>
+    <p>
+        Scheduled tasks (<code>send_notifications</code> command) run in the background
+        to process events.
+    </p>
+</body>
+</html>
