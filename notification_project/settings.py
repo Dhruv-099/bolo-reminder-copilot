@@ -14,6 +14,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 
+load_dotenv()  # load .env so SARVAM_API_KEY etc. reach os.environ
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -25,10 +27,7 @@ SECRET_KEY = 'django-insecure-bm8l&(&3$4w@qgh5dv*(c%yx!ao_(&133$rby8trag3pbmnf+k
 
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1','https://promoted-tops-sparrow.ngrok-free.app']
-
-if os.getenv('YOUR_NGROK_OR_PUBLIC_DOMAIN'):
-    ALLOWED_HOSTS.append(os.getenv('YOUR_NGROK_OR_PUBLIC_DOMAIN').split('//')[1].split(':')[0])
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 
 # Application definition
@@ -128,10 +127,7 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 MEDIA_URL= '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media_root')
-YOUR_NGROK_OR_PUBLIC_DOMAIN = os.getenv('YOUR_NGROK_OR_PUBLIC_DOMAIN')
-VONAGE_API_KEY = os.getenv('VONAGE_API_KEY')
-VONAGE_API_SECRET = os.getenv('VONAGE_API_SECRET')
-VONAGE_PHONE_NUMBER = os.getenv('VONAGE_PHONE_NUMBER')
 
-LANGFLOW_API_ENDPOINT = os.getenv('LANGFLOW_API_ENDPOINT')
-LANGFLOW_API_KEY = os.getenv('LANGFLOW_API_KEY')
+# Sarvam AI (translation + Bulbul TTS) — the key lives in .env, never in code.
+# Optional env flips: SARVAM_TTS_MODEL (bulbul:v3 | bulbul:v4-flash),
+# SARVAM_TTS_SPEAKER (voice name or persona id).

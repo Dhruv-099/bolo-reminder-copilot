@@ -1,149 +1,143 @@
 # create_synthetic_data.py
+"""Seed the demo with fictional people and due reminder events.
+
+Every person carries a preferred language; the dispatch workflow translates
+and voices each reminder accordingly. Event times are relative to "now", so
+running this script always leaves the system demo-ready. It resets existing
+demo data first.
+"""
 import os
-import django
 from datetime import timedelta
 
+import django
+
 # Set up Django environment
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'notification_project.settings')
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "notification_project.settings")
 django.setup()
 
 from django.utils import timezone
-from notifier.models import Person, Event # Your app and model names
+
+from notifier.models import Event, Person
+
 
 def clear_data():
-    """Clears existing Person and Event data."""
-    print("Clearing existing Event data...")
+    """Clears existing demo data so every run starts fresh."""
+    print("Clearing existing demo data...")
     Event.objects.all().delete()
-    print("Clearing existing Person data...")
     Person.objects.all().delete()
     print("Data cleared.")
 
+
 def create_people():
-    """Creates sample Person objects."""
+    """Creates fictional people across the supported reminder languages."""
     people_data = [
-        {"name": "Rahul Verma", "phone_number": "+919000000001", "email": "rahul@example.com"},
-        {"name": "Alice Wonderland", "phone_number": "+12005550101", "email": "alice@example.com"},
-        {"name": "Bob The Builder", "phone_number": "+12005550102", "email": "bob@example.com"},
-        {"name": "Charlie Brown", "phone_number": "+12005550103", "email": "charlie@example.com"},
-        {"name": "Diana Prince", "phone_number": "+12005550104", "email": "diana@example.com"},
-        {"name": "Edward Scissorhands", "phone_number": "+12005550105", "email": "edward@example.com"},
+        {"name": "Rahul Verma", "phone_number": "+919000000001", "email": "rahul@example.com", "preferred_language": "hi-IN"},
+        {"name": "Arjun Reddy", "phone_number": "+919000000002", "email": "arjun@example.com", "preferred_language": "te-IN"},
+        {"name": "Priya Iyer", "phone_number": "+919000000003", "email": "priya@example.com", "preferred_language": "ta-IN"},
+        {"name": "Sneha Patil", "phone_number": "+919000000004", "email": "sneha@example.com", "preferred_language": "mr-IN"},
+        {"name": "Ananya Rao", "phone_number": "+919000000005", "email": "ananya@example.com", "preferred_language": "kn-IN"},
+        {"name": "John Dsouza", "phone_number": "+919000000006", "email": "john@example.com", "preferred_language": "en-IN"},
     ]
     created_people = []
-    print("Creating Person objects...")
+    print("Creating fictional people...")
     for data in people_data:
-        person, created = Person.objects.get_or_create(phone_number=data["phone_number"], defaults=data)
-        if created:
-            print(f"  Created Person: {person.name}")
-        else:
-            print(f"  Person {person.name} already exists.")
+        person, _ = Person.objects.get_or_create(phone_number=data["phone_number"], defaults=data)
+        print(f"  Created {person.name} (reminders in {person.preferred_language})")
         created_people.append(person)
     return created_people
 
+
 def create_events(people):
-    """Creates sample Event objects for the given people."""
+    """Creates reminder events with times relative to now.
+
+    Most events are due immediately; two are deliberately not due yet, so the
+    dispatch preview has a real filter to respect.
+    """
     now = timezone.now()
-    print("\nCreating Event objects...")
+    print("\nCreating events...")
 
     event_definitions = [
+        # --- Rahul (Hindi) ---
         {
             "person_index": 0, "event_type": Event.EventType.MEETING,
-            "event_datetime_delta": timedelta(minutes=75), # Due in 1h 15m
-            "message_template": "Hi {name}, reminder: Your '{details}' {event_type_display} is {time_left} at {time} on {date}. The call will present options.",
-            "details": "Project Alpha Sync", "notification_lead_time_minutes": 60
-        },
-        # --- Events for Alice ---
-        {
-            "person_index": 0, "event_type": Event.EventType.MEETING,
-            "event_datetime_delta": timedelta(minutes=75), # Due in 1h 15m
-            "message_template": "Hi {name}, reminder: Your '{details}' {event_type_display} is {time_left} at {time} on {date}. The call will present options.",
-            "details": "Project Alpha Sync", "notification_lead_time_minutes": 60
+            "event_datetime_delta": timedelta(minutes=75),
+            "message_template": "Hi {name}, reminder: your '{details}' {event_type_display} is {time_left} at {time} on {date}.",
+            "details": "Project Alpha Sync", "notification_lead_time_minutes": 120,
         },
         {
             "person_index": 0, "event_type": Event.EventType.BIRTHDAY,
-            "event_datetime_delta": timedelta(days=2, hours=5), # Due in 2 days
-            "message_template": "Hi {name}! Just a heads up, your {event_type_display} is {time_left}! We'll call with a special greeting. Happy Birthday soon!",
-            "details": "Alice's Birthday Bash", "notification_lead_time_minutes": 24 * 60 # 1 day before
+            "event_datetime_delta": timedelta(days=2),
+            "message_template": "Hi {name}! Your {event_type_display} is {time_left}. We will send a special greeting.",
+            "details": "Birthday Celebration",
+            "notification_lead_time_minutes": 24 * 60,  # not due yet
         },
-        # --- Events for Bob ---
+        # --- Arjun (Telugu) ---
         {
             "person_index": 1, "event_type": Event.EventType.WEBINAR,
-            "event_datetime_delta": timedelta(hours=3), # Due in 3 hours
-            "message_template": "{name}, your {event_type_display} on '{details}' starts {time_left}. Dial in details will be on the call.",
-            "details": "Future of AI", "notification_lead_time_minutes": 120 # 2 hours before
+            "event_datetime_delta": timedelta(hours=3),
+            "message_template": "{name}, your {event_type_display} on '{details}' starts {time_left}, at {time}.",
+            "details": "Future of AI", "notification_lead_time_minutes": 240,
         },
         {
             "person_index": 1, "event_type": Event.EventType.REMINDER,
-            "event_datetime_delta": timedelta(minutes=30), # Due in 30 mins
-            "message_template": "Quick reminder for {name}: '{details}' is {time_left}. Call will follow.",
-            "details": "Submit timesheet", "notification_lead_time_minutes": 15
+            "event_datetime_delta": timedelta(minutes=30),
+            "message_template": "Quick reminder for {name}: '{details}' is {time_left}.",
+            "details": "Submit timesheet", "notification_lead_time_minutes": 45,
         },
-        # --- Events for Charlie ---
+        # --- Priya (Tamil) ---
         {
-            "person_index": 2, "event_type": Event.EventType.CONFERENCE,
-            "event_datetime_delta": timedelta(days=7), # 1 week away
-            "message_template": "Greetings {name}, the {event_type_display} '{details}' is {time_left}. More info will be provided on the interactive call.",
-            "details": "DevCon 2025", "notification_lead_time_minutes": 3 * 24 * 60 # 3 days before
+            "person_index": 2, "event_type": Event.EventType.WORKSHOP,
+            "event_datetime_delta": timedelta(minutes=45),
+            "message_template": "{name}, your workshop '{details}' begins {time_left}, at {time} on {date}.",
+            "details": "Advanced Python", "notification_lead_time_minutes": 60,
         },
-        # --- Events for Diana (some further out) ---
+        # --- Sneha (Marathi) ---
         {
-            "person_index": 3, "event_type": Event.EventType.WORKSHOP,
-            "event_datetime_delta": timedelta(days=10, hours=2),
-            "message_template": "{name}, your workshop '{details}' is {time_left}. Please prepare accordingly.",
-            "details": "Advanced Python", "notification_lead_time_minutes": 7 * 24 * 60 # 1 week before
-        },
-        {
-            "person_index": 3, "event_type": Event.EventType.ANNIVERSARY,
-            "event_datetime_delta": timedelta(days=30),
-            "message_template": "Hi {name}, your {event_type_display} is {time_left}! We'll be in touch.",
-            "details": "Work Anniversary", "notification_lead_time_minutes": 5 * 24 * 60 # 5 days before
-        },
-        # --- Events for Edward (one very soon) ---
-        {
-            "person_index": 4, "event_type": Event.EventType.SOCIAL_EVENT,
-            "event_datetime_delta": timedelta(minutes=5), # Due in 5 mins (will trigger immediately if lead time < 5)
+            "person_index": 3, "event_type": Event.EventType.SOCIAL_EVENT,
+            "event_datetime_delta": timedelta(minutes=5),
             "message_template": "Hey {name}! The {event_type_display} '{details}' is starting {time_left}! Hope you can make it.",
-            "details": "Team Lunch", "notification_lead_time_minutes": 10 # Lead time is 10 mins
+            "details": "Team Lunch", "notification_lead_time_minutes": 10,
         },
+        # --- Ananya (Kannada) ---
         {
-            "person_index": 4, "event_type": Event.EventType.HOLIDAY,
-            "event_datetime_delta": timedelta(days=1, hours=1),
-            "message_template": "{name}, friendly reminder that the {event_type_display} '{details}' is {time_left}.",
-            "details": "Office Closed for Public Holiday", "notification_lead_time_minutes": 24*60 # 1 day
+            "person_index": 4, "event_type": Event.EventType.CONFERENCE,
+            "event_datetime_delta": timedelta(days=7),
+            "message_template": "Greetings {name}, the {event_type_display} '{details}' is {time_left}.",
+            "details": "DevCon 2026",
+            "notification_lead_time_minutes": 3 * 24 * 60,  # not due yet
         },
-        # --- Event that should have passed notification time but not occurred (for testing edge cases) ---
+        # --- John (English) ---
         {
-            "person_index": 0, "event_type": Event.EventType.OTHER,
-            "event_datetime_delta": timedelta(minutes=45), # Event in 45 mins
-            "message_template": "{name}, your '{details}' event is {time_left}. This is a test message.",
-            "details": "System Check", "notification_lead_time_minutes": 60 # Lead time was 1 hour ago, so should be due
+            "person_index": 5, "event_type": Event.EventType.REMINDER,
+            "event_datetime_delta": timedelta(minutes=90),
+            "message_template": "{name}, a gentle reminder: '{details}' is due {time_left}, at {time}.",
+            "details": "Quarterly report submission", "notification_lead_time_minutes": 120,
         },
     ]
 
     for data in event_definitions:
         person = people[data["person_index"]]
         event_datetime = now + data["event_datetime_delta"]
-        
+
         Event.objects.create(
             person=person,
             event_type=data["event_type"],
             event_datetime=event_datetime,
             message_template=data["message_template"],
-            details=data.get("details", f"Details for {data['event_type'].lower()}"), # Default details
+            details=data.get("details", ""),
             notification_lead_time_minutes=data["notification_lead_time_minutes"],
-            # sms_sent_at and call_made_at will be None by default
         )
         print(f"  Created {data['event_type']} for {person.name} at {event_datetime.strftime('%Y-%m-%d %H:%M')}")
 
-def main():
-    """Main function to run the data creation."""
-    # Optional: Clear existing data first if you want a fresh start each time
-    # Be careful with this in a non-dev environment!
-    # clear_data()
 
+def main():
+    """Resets and reseeds the demo data."""
+    clear_data()
     created_people = create_people()
     if created_people:
         create_events(created_people)
-    print("\nSynthetic data creation process finished.")
+    print("\nDemo data ready. Run 'python manage.py send_notifications' to preview due reminders.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

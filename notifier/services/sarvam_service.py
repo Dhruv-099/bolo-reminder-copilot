@@ -1,0 +1,166 @@
+"""Sarvam AI service layer for the Bolo reminder copilot.
+
+Two functions, both failure-safe:
+
+- translate_message():    colloquial translation of reminder text (mayura:v1)
+- generate_voice_audio(): Bulbul text-to-speech; saves a WAV under
+                          MEDIA_ROOT/reminders and returns its path
+
+A missing SARVAM_API_KEY or a failed API call logs the error and returns
+None, so the dispatch workflow can report a per-event failure instead of
+crashing. Secrets live only in the environment (.env / process env), never
+in code.
+"""
+
+import base64
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+
+import requests
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+SARVAM_TRANSLATE_URL = "https://api.sarvam.ai/translate"
+SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
+
+# BCP-47 codes understood by both the Translate and Bulbul TTS APIs.
+SUPPORTED_LANGUAGES = {
+    "en-IN": "English",
+    "hi-IN": "Hindi",
+    "bn-IN": "Bengali",
+    "gu-IN": "Gujarati",
+    "kn-IN": "Kannada",
+    "ml-IN": "Malayalam",
+    "mr-IN": "Marathi",
+    "od-IN": "Odia",
+    "pa-IN": "Punjabi",
+    "ta-IN": "Tamil",
+    "te-IN": "Telugu",
+}
+
+DEFAULT_TRANSLATE_MODEL = "mayura:v1"
+
+
+def _headers():
+    """Auth headers for Sarvam, or None when SARVAM_API_KEY is not set."""
+    key = os.getenv("SARVAM_API_KEY", "")
+    if not key:
+        logger.error("SARVAM_API_KEY is not set - Sarvam calls will fail.")
+        return None
+    return {"api-subscription-key": key, "Content-Type": "application/json"}
+
+
+def translate_message(text, target_language_code, source_language_code="en-IN", mode="modern-colloquial"):
+    """Translate text into target_language_code.
+
+    Uses mayura:v1 in a colloquial mode by default, so reminders read the way
+    people actually speak. English passes through unchanged. Returns the
+    translated string, or None on any failure.
+    """
+    if target_language_code == "en-IN":
+        return text
+    if target_language_code not in SUPPORTED_LANGUAGES:
+        logger.error("Unsupported target language code: %s", target_language_code)
+        return None
+
+    headers = _headers()
+    if headers is None:
+        return None
+
+    payload = {
+        "input": text[:1000],  # mayura:v1 request limit
+        "source_language_code": source_language_code,
+        "target_language_code": target_language_code,
+        "mode": mode,
+        "model": DEFAULT_TRANSLATE_MODEL,
+    }
+    try:
+        response = requests.post(SARVAM_TRANSLATE_URL, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        translated = response.json().get("translated_text")
+        if not translated:
+            logger.error("Sarvam translate returned no text for %s.", target_language_code)
+            return None
+        return translated.strip()
+    except requests.RequestException as exc:
+        logger.error("Sarvam translate failed: %s", exc)
+        return None
+
+
+def default_tts_model():
+    """Bulbul model to use (env override: SARVAM_TTS_MODEL)."""
+    return os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
+
+
+def default_tts_speaker(model=None):
+    """Speaker voice for the given model (env override: SARVAM_TTS_SPEAKER).
+
+    v3 uses short names (shubh); v4-flash uses persona ids
+    (e.g. aparna_hi_customer). The defaults match each model.
+    """
+    override = os.getenv("SARVAM_TTS_SPEAKER")
+    if override:
+        return override
+    if (model or default_tts_model()).startswith("bulbul:v4"):
+        return "shubh_enhi_ads"  # v4-flash default persona
+    return "shubh"  # v3 default
+
+
+def generate_voice_audio(text, language_code, speaker=None, model=None, event_id=None):
+    """Generate spoken audio for text with Sarvam Bulbul TTS.
+
+    Writes a WAV into MEDIA_ROOT/reminders and returns the path relative to
+    MEDIA_ROOT, or None on any failure.
+    """
+    if language_code not in SUPPORTED_LANGUAGES:
+        logger.error("Unsupported TTS language code: %s", language_code)
+        return None
+
+    headers = _headers()
+    if headers is None:
+        return None
+
+    model = model or default_tts_model()
+    speaker = speaker or default_tts_speaker(model)
+    payload = {
+        "text": text[:2500],  # Bulbul v3/v4 request limit
+        "language_code": language_code,
+        "model": model,
+        "speaker": speaker,
+        "pace": 1.0,
+        "speech_sample_rate": 22050,
+        "output_audio_codec": "wav",
+    }
+    try:
+        response = requests.post(SARVAM_TTS_URL, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        audios = response.json().get("audios") or []
+        if not audios:
+            logger.error("Sarvam TTS returned no audio for %s.", language_code)
+            return None
+        audio_bytes = base64.b64decode(audios[0])
+    except requests.RequestException as exc:
+        logger.error("Sarvam TTS failed: %s", exc)
+        return None
+    except (ValueError, TypeError) as exc:
+        logger.error("Could not decode Sarvam TTS audio: %s", exc)
+        return None
+
+    audio_dir = Path(settings.MEDIA_ROOT) / "reminders"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    prefix = f"event_{event_id}_" if event_id is not None else ""
+    file_name = f"{prefix}{language_code}_{stamp}.wav"
+    (audio_dir / file_name).write_bytes(audio_bytes)
+
+    relative_path = f"reminders/{file_name}"
+    logger.info("Generated voice audio: %s (%d bytes)", relative_path, len(audio_bytes))
+    return relative_path
+
+
+def audio_absolute_path(relative_path):
+    """Absolute filesystem path for an audio path returned above (for playback)."""
+    return str(Path(settings.MEDIA_ROOT) / relative_path)
