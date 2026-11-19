@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "bolo": {
+        "type": "local",
+        "command": [".venv/Scripts/python.exe", "dispatch_due_reminders_server.py"],
+        "environment": {
+          "DJANGO_SETTINGS_MODULE": "notification_project.settings"
+        },
+        "codemode": false
+      }
+    }
+  }
+}

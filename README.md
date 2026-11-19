@@ -104,7 +104,8 @@ prints a client config snippet. (Hosted builds - `synapse init` then
 
 ### Connect an agent (OpenCode)
 
-`opencode.jsonc` in the project root:
+`opencode.jsonc` ships in this repo — open the project folder in OpenCode and
+the `bolo` server connects automatically (verify with `opencode mcp list`):
 
 ```jsonc
 {
@@ -113,19 +114,21 @@ prints a client config snippet. (Hosted builds - `synapse init` then
     "servers": {
       "bolo": {
         "type": "local",
-        "command": ["python", "dispatch_due_reminders_server.py"],
+        "command": [".venv/Scripts/python.exe", "dispatch_due_reminders_server.py"],
         "environment": {
-          "SARVAM_API_KEY": "{env:SARVAM_API_KEY}",
           "DJANGO_SETTINGS_MODULE": "notification_project.settings"
-        }
+        },
+        "codemode": false
       }
     }
   }
 }
 ```
 
-Verify with `opencode mcp list` (expects `connected`). The same server file
-plugs into Claude Desktop or Cursor using the snippet Synapse prints.
+`SARVAM_API_KEY` is read from `.env` when the server starts (via
+`load_dotenv()` in settings), so it never appears in any config. The same
+server file plugs into Claude Desktop or Cursor using the snippet Synapse
+prints.
 
 ## Demo script (~4 minutes)
 
