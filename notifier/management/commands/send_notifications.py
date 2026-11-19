@@ -4,6 +4,8 @@ Previews due reminders by default. Pass --confirm to actually dispatch, and
 --event-ids 3,7 to scope the run to specific events.
 """
 
+import sys
+
 from django.core.management.base import BaseCommand
 
 from notifier.services.reminder_dispatch import dispatch_due_reminders, render_report
@@ -26,6 +28,11 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        # Windows consoles often default to a legacy code page that cannot
+        # print Indic scripts; force UTF-8 so reports render everywhere.
+        if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+            sys.stdout.reconfigure(encoding="utf-8")
+
         event_ids = [part for part in options["event_ids"].split(",") if part.strip().isdigit()]
         report = dispatch_due_reminders(confirm=options["confirm"], event_ids=event_ids or None)
         self.stdout.write(render_report(report))
