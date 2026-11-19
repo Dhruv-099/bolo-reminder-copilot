@@ -58,11 +58,13 @@ def draft_message_template(event_type, details, model=None):
         # max_tokens — a small budget gets consumed entirely by reasoning
         # (finish_reason "length", empty content, failed draft). Drafting
         # doesn't need thinking, so switch it off (105b accepts "none").
-        # Models that cannot (glm5.3, kimi) need this unset and a bigger
-        # max_tokens instead.
-        "reasoning_effort": os.getenv("SARVAM_LLM_REASONING", "none"),
+        # Models that cannot (glm5.3, kimi) need this omitted and a bigger
+        # max_tokens instead: set SARVAM_LLM_REASONING to an empty value.
         "max_tokens": 1024,
     }
+    reasoning_effort = os.getenv("SARVAM_LLM_REASONING", "none")
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     try:
         response = requests.post(CHAT_URL, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
