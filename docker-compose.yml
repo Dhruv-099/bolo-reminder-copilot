@@ -9,6 +9,9 @@ services:
     restart: unless-stopped
     volumes:
       - media:/app/media_root
+      # Survives container recreation (reboot/crash recovery only restarts the
+      # same container; a `down`/rebuild would otherwise reset the demo data).
+      - ./db.sqlite3:/app/db.sqlite3
 
 volumes:
   media:
