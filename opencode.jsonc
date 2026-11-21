@@ -4,7 +4,9 @@
     "servers": {
       "bolo": {
         "type": "local",
-        // Linux venv layout (was ".venv/Scripts/python.exe", Windows-only).
+        // Linux venv layout (this repo's deployed home on spark). Running the
+        // agent from Windows instead? Swap the line below for:
+        //   "command": [".venv/Scripts/python.exe", "dispatch_due_reminders_server.py"]
         "command": ["/home/dhruv/bolo-reminder-copilot/.venv/bin/python", "dispatch_due_reminders_server.py"],
         "environment": {
           "DJANGO_SETTINGS_MODULE": "notification_project.settings"

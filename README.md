@@ -155,9 +155,12 @@ then fall back to a direct `ANTHROPIC_API_KEY`.
 The generated server is thin and ours to edit (per Synapse): the other five
 tools were hand-added on the same scaffold. `opencode.jsonc` connects it —
 open the project in OpenCode and the `bolo` server appears
-(verify with `opencode mcp list`). `SARVAM_API_KEY` is read from `.env` when
-the server starts (via `load_dotenv()` in settings), so it never appears in
-any config. The same server file plugs into Claude Desktop or Cursor.
+(verify with `opencode mcp list`). The committed config points at the Linux
+deployment's venv; running the agent from a Windows checkout means swapping
+one line to `[".venv/Scripts/python.exe", "dispatch_due_reminders_server.py"]`
+(both variants are commented in the file). `SARVAM_API_KEY` is read from `.env`
+when the server starts (via `load_dotenv()` in settings), so it never appears
+in any config. The same server file plugs into Claude Desktop or Cursor.
 
 ## Demo script (~4 minutes)
 
