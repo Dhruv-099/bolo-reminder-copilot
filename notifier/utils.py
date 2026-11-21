@@ -1,4 +1,15 @@
+import os
+
 from django.utils import timezone
+
+def public_base_url():
+    """Externally reachable base URL for links/webhooks (env-tunable)."""
+    return os.getenv("BOLO_PUBLIC_BASE_URL", "http://192.168.1.15:8000").rstrip("/")
+
+
+def respond_url(event_id):
+    """Link a client taps to hear the reminder and press 1 / 2."""
+    return f"{public_base_url()}/notifier/respond/{event_id}/"
 
 def format_time_left(event_datetime):
     """

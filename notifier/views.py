@@ -1,6 +1,7 @@
 # notifier/views.py
 import hmac
 import json
+import logging
 import os
 
 from django.contrib import messages
@@ -12,6 +13,8 @@ from django.views.decorators.http import require_POST
 from notifier.models import LANGUAGES, Event, Person
 from notifier.services.reminder_dispatch import dispatch_due_reminders, prepare_reminder
 from notifier.services.responses import record_response
+
+logger = logging.getLogger(__name__)
 
 
 def home_page_view(request):
@@ -182,6 +185,63 @@ def response_webhook(request):
     channel = str(data.get("channel") or "webhook").strip()[:20] or "webhook"
     result = record_response(event_id, data.get("digit", ""), channel=channel)
     return JsonResponse(result, status=200 if result["ok"] else 400)
+
+
+@csrf_exempt
+@require_POST
+def call_outcome_webhook(request):
+    """Sarvam Voice Agents instant-outbound outcomes.
+
+    Sarvam POSTs here after each call attempt (connected, no_answer, busy,
+    failed). Token rides in the query string because Sarvam's inline
+    webhook_config carries no headers. The event comes back via the
+    metadata we attached when placing the call.
+
+    - connected + a yes/no in the agent's reply variable -> record_response
+      (channel "voice_call"), same as the demo page and any other channel.
+    - no_answer / busy / failed -> nothing stored: the reply stays PENDING
+      and the existing retry ladder decides whether to try again later.
+    """
+    expected = os.getenv("BOLO_WEBHOOK_TOKEN", "")
+    if not expected:
+        return JsonResponse(
+            {"ok": False, "error": "webhook_disabled",
+             "message": "Set BOLO_WEBHOOK_TOKEN in the environment to enable this endpoint."},
+            status=403,
+        )
+    if not hmac.compare_digest(str(expected), str(request.GET.get("token", ""))):
+        return JsonResponse({"ok": False, "error": "unauthorized"}, status=401)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "error": "invalid_json"}, status=400)
+
+    metadata = (payload.get("webhook_config") or {}).get("metadata") or {}
+    event_id = metadata.get("event_id")
+    status = str(payload.get("status") or "")
+
+    logger.info(
+        "Sarvam call outcome: attempt=%s event=%s status=%s",
+        payload.get("attempt_id"), event_id, status,
+    )
+
+    if status != "connected":
+        # PENDING + elapsed time is exactly what the retry ladder understands.
+        return JsonResponse({"ok": True, "recorded": status})
+
+    reply_variable = os.getenv("BOLO_VOICE_REPLY_VARIABLE", "client_reply")
+    variables = payload.get("final_agent_variables") or {}
+    reply = str(variables.get(reply_variable, "")).strip().lower()
+
+    yes_words = {"yes", "confirmed", "confirm", "1", "haan", "ha", "haa", "okay", "ok"}
+    no_words = {"no", "declined", "cancel", "cannot", "can't", "2", "nahi", "nahin", "na"}
+    digit = "1" if reply in yes_words else "2" if reply in no_words else None
+
+    if event_id and digit:
+        result = record_response(int(event_id), digit, channel="voice_call")
+        return JsonResponse(result, status=200 if result["ok"] else 400)
+    return JsonResponse({"ok": True, "recorded": "connected", "reply": reply or None})
 
 
 def analytics(request):

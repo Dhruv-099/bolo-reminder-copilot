@@ -14,7 +14,7 @@ from django.test import Client, TestCase
 from django.utils import timezone
 
 from notifier.models import Event, Person
-from notifier.services import agent_tools, delivery, sarvam_service
+from notifier.services import agent_tools, call_service, delivery, sarvam_service, sms_service
 from notifier.services.reminder_dispatch import (
     dispatch_due_reminders,
     find_due_events,
@@ -690,3 +690,196 @@ class ResponseWebhookTests(TestCase):
         response = self.post_json({"digit": "1"}, HTTP_AUTHORIZATION="Bearer sekrit-token")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "invalid_event_id")
+
+
+VOICE_ENV = {
+    "SARVAM_VOICE_API_KEY": "vk",
+    "SARVAM_VOICE_ORG_ID": "org",
+    "SARVAM_VOICE_WORKSPACE_ID": "ws",
+    "SARVAM_VOICE_APP_ID": "app",
+    "SARVAM_VOICE_CONNECTION_ID": "conn",
+    "SARVAM_VOICE_NUMBER": "+911111111111",
+    "BOLO_WEBHOOK_TOKEN": "tok",
+    "BOLO_PUBLIC_BASE_URL": "http://192.168.1.15:8000",
+}
+
+
+class SmsServiceTests(TestCase):
+    def setUp(self):
+        self.person = make_person(phone="+919000000021")
+        self.event = make_event(self.person)
+        self.package = {"text_local": "नमस्ते, यह अनुस्मारक है।", "text_english": "Hi, this is a reminder."}
+
+    def test_not_configured(self):
+        with mock.patch.object(sms_service, "_msg91_configured", return_value=False):
+            result = sms_service.send_reminder_sms(self.event, self.package)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "not_configured")
+
+    def test_payload_shape(self):
+        with mock.patch.dict(os.environ, {"MSG91_AUTH_KEY": "key123", "MSG91_FLOW_ID": "flow9"}), \
+             mock.patch("notifier.services.sms_service.requests.post") as post:
+            post.return_value.json.return_value = {"type": "success"}
+            result = sms_service.send_reminder_sms(self.event, self.package)
+        self.assertTrue(result["ok"], result)
+        payload = post.call_args.kwargs["json"]
+        recipient = payload["recipients"][0]
+        self.assertEqual(recipient["mobiles"], "919000000021", "leading plus must be stripped")
+        self.assertEqual(recipient["VAR1"], "नमस्ते, यह अनुस्मारक है।")
+        self.assertIn("/notifier/respond/", recipient["VAR2"])
+        self.assertEqual(post.call_args.kwargs["headers"]["authkey"], "key123")
+
+    def test_provider_rejection(self):
+        with mock.patch.dict(os.environ, {"MSG91_AUTH_KEY": "k", "MSG91_FLOW_ID": "f"}), \
+             mock.patch("notifier.services.sms_service.requests.post") as post:
+            post.return_value.json.return_value = {"type": "error"}
+            result = sms_service.send_reminder_sms(self.event, self.package)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "send_rejected")
+
+
+class CallServiceTests(TestCase):
+    def setUp(self):
+        self.person = make_person(phone="+919000000022", language="te-IN")
+        self.event = make_event(self.person)
+        self.package = {"text_local": "తెలుగు రిమైండర్", "text_english": "Telugu reminder"}
+
+    def test_not_configured(self):
+        with mock.patch.object(call_service, "_voice_configured", return_value=False):
+            result = call_service.place_call(self.event, self.package)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "not_configured")
+
+    def test_payload_shape(self):
+        with mock.patch.dict(os.environ, VOICE_ENV), \
+             mock.patch("notifier.services.call_service.requests.post") as post:
+            post.return_value.json.return_value = {"attempt_id": "att-123"}
+            result = call_service.place_call(self.event, self.package)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["attempt_id"], "att-123")
+        self.assertEqual(result["language"], "Telugu")
+
+        url = post.call_args.args[0]
+        self.assertIn("/orgs/org/workspaces/ws/outbounds", url)
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["user_config"]["user_phone_number"], "+919000000022")
+
+        overrides = payload["app_config"]["app_overrides"]
+        self.assertEqual(overrides["initial_bot_message"], "తెలుగు రిమైండర్")
+        self.assertEqual(overrides["initial_language_name"], "Telugu")
+
+        self.assertEqual(payload["webhook_config"]["metadata"]["event_id"], self.event.id)
+        self.assertIn("token=tok", payload["webhook_config"]["url"])
+        self.assertEqual(post.call_args.kwargs["headers"]["X-API-Key"], "vk")
+
+    def test_webhook_omitted_without_token(self):
+        env = {**VOICE_ENV, "BOLO_WEBHOOK_TOKEN": ""}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch("notifier.services.call_service.requests.post") as post:
+            post.return_value.json.return_value = {"attempt_id": "a"}
+            call_service.place_call(self.event, self.package)
+        self.assertNotIn("webhook_config", post.call_args.kwargs["json"])
+
+    def test_no_attempt_id_is_failure(self):
+        with mock.patch.dict(os.environ, VOICE_ENV), \
+             mock.patch("notifier.services.call_service.requests.post") as post:
+            post.return_value.json.return_value = {}
+            result = call_service.place_call(self.event, self.package)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "no_attempt_id")
+
+
+class RealDeliveryRoutingTests(SarvamMockMixin, TestCase):
+    """Delivery routes through the real SMS / call services when configured."""
+
+    def _dispatch_one(self, person):
+        make_event(person)
+        return dispatch_due_reminders(confirm=True)["results"][0]
+
+    def test_sms_configured_sends(self):
+        person = make_person(
+            phone="+919000000031", channel_preference=Person.ChannelPreference.SMS
+        )
+        with mock.patch.object(
+            delivery.sms_service, "send_reminder_sms",
+            return_value={"ok": True, "provider": "msg91",
+                          "link": "http://192.168.1.15:8000/notifier/respond/1/"},
+        ) as send:
+            delivery_info = self._dispatch_one(person)["delivery"]
+        self.assertEqual(delivery_info["mode"], "sent:msg91")
+        self.assertIn("/notifier/respond/", delivery_info["link"])
+        send.assert_called_once()
+
+    def test_call_configured_places_call(self):
+        person = make_person(
+            phone="+919000000032", channel_preference=Person.ChannelPreference.VOICE_CALL
+        )
+        with mock.patch.object(
+            delivery.call_service, "place_call",
+            return_value={"ok": True, "attempt_id": "att-9", "language": "Hindi"},
+        ) as place:
+            delivery_info = self._dispatch_one(person)["delivery"]
+        self.assertEqual(delivery_info["mode"], "call_placed")
+        self.assertEqual(delivery_info["attempt_id"], "att-9")
+        place.assert_called_once()
+
+
+class CallOutcomeWebhookTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.person = make_person()
+        self.event = make_event(self.person, voice_dispatched_at=timezone.now())
+        self.env = mock.patch.dict(os.environ, {"BOLO_WEBHOOK_TOKEN": "tok"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def post_payload(self, payload, token="tok"):
+        url = f"/notifier/webhook/call/?token={token}" if token else "/notifier/webhook/call/"
+        return self.client.post(url, data=json.dumps(payload), content_type="application/json")
+
+    def connected_payload(self, **overrides):
+        payload = {
+            "attempt_id": "att",
+            "status": "connected",
+            "webhook_config": {"url": "x", "metadata": {"event_id": self.event.id}},
+            "final_agent_variables": {"client_reply": "Yes"},
+            "interaction_transcript": [
+                {"role": "agent", "en_text": "Hello, this is your reminder."},
+                {"role": "user", "en_text": "Yes, I will be there."},
+            ],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_connected_yes_records_confirmation(self):
+        response = self.post_payload(self.connected_payload())
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.CONFIRMED)
+        self.assertEqual(self.event.response_channel, "voice_call")
+
+    def test_connected_no_records_decline(self):
+        response = self.post_payload(self.connected_payload(final_agent_variables={"client_reply": "nahi"}))
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.DECLINED)
+
+    def test_no_answer_leaves_pending_for_retry_ladder(self):
+        response = self.post_payload({
+            "attempt_id": "b",
+            "status": "no_answer",
+            "webhook_config": {"url": "x", "metadata": {"event_id": self.event.id}},
+        })
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.PENDING)
+
+    def test_connected_without_reply_variable_changes_nothing(self):
+        response = self.post_payload(self.connected_payload(final_agent_variables={}))
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.PENDING)
+
+    def test_missing_token_unauthorized(self):
+        response = self.post_payload({"status": "no_answer"}, token=None)
+        self.assertEqual(response.status_code, 401)

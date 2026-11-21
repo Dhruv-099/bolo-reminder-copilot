@@ -16,6 +16,7 @@ import logging
 import os
 
 from notifier.models import Person
+from notifier.services import call_service, sms_service
 
 logger = logging.getLogger(__name__)
 
@@ -53,23 +54,39 @@ def deliver_via_whatsapp(event, package):
     }
 
 
-def _deferred_handler(channel):
-    """Handler for channels whose real sender is still to be wired."""
+def deliver_via_sms(event, package):
+    """Text the reminder + respond link through MSG91 when configured."""
+    result = sms_service.send_reminder_sms(event, package)
+    if result["ok"]:
+        return {"via": "sms", "mode": "sent:msg91", "link": result.get("link")}
+    return {
+        "via": "sms",
+        "mode": "recorded_fallback:sms",
+        "note": f"sms not sent ({result.get('error')}) - package recorded",
+    }
 
-    def handler(event, package):
+
+def deliver_via_call(event, package):
+    """Place a Sarvam Voice Agents AI call when configured."""
+    result = call_service.place_call(event, package)
+    if result["ok"]:
         return {
-            "via": channel,
-            "mode": f"recorded_fallback:{channel}",
-            "note": "real sender lands here (prototype-deferred)",
+            "via": "voice_call",
+            "mode": "call_placed",
+            "attempt_id": result.get("attempt_id"),
+            "language": result.get("language"),
         }
-
-    return handler
+    return {
+        "via": "voice_call",
+        "mode": "recorded_fallback:voice_call",
+        "note": f"call not placed ({result.get('error')}) - package recorded",
+    }
 
 
 CHANNEL_HANDLERS = {
     Person.ChannelPreference.WHATSAPP: deliver_via_whatsapp,
-    Person.ChannelPreference.VOICE_CALL: _deferred_handler("voice_call"),
-    Person.ChannelPreference.SMS: _deferred_handler("sms"),
+    Person.ChannelPreference.VOICE_CALL: deliver_via_call,
+    Person.ChannelPreference.SMS: deliver_via_sms,
     Person.ChannelPreference.DEMO_PAGE: deliver_via_demo_page,
 }
 
