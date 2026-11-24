@@ -7,8 +7,9 @@ plug in as handlers below; when their credentials are absent each channel
 falls back to the recorded demo package, so the dispatch workflow - preview,
 confirm, retry ladder, responses - behaves identically either way.
 
-Replies from real channels come back through /notifier/webhook/response/
-(see views.response_webhook); the demo respond page posts the same digits.
+Replies come back through the token-gated webhooks (response/ for bridge
+digits, call/ for Sarvam outcomes, whatsapp/ for Meta callbacks - see
+views); the demo respond page posts the same digits into record_response.
 """
 
 import logging

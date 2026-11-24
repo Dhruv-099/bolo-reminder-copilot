@@ -144,7 +144,9 @@ def _webhook_token(request):
 @csrf_exempt
 @require_POST
 def response_webhook(request):
-    """Inbound replies from real channels: IVR DTMF digits, WhatsApp bots.
+    """Inbound replies from bridges: IVR DTMF digits and any integration
+    that posts a digit. WhatsApp replies arrive via
+    /notifier/webhook/whatsapp/ instead.
 
     Auth: the BOLO_WEBHOOK_TOKEN env value as a Bearer token or X-Api-Key
     header (or `token` parameter). The endpoint stays disabled (403) until

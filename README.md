@@ -183,10 +183,10 @@ in any config. The same server file plugs into Claude Desktop or Cursor.
   **fictional**. This repository has never contained personal data.
 - Translation, voice audio and (when enabled) LLM-drafted templates are
   **really generated** by the Sarvam API during the demo.
-- The *delivery channel* is demo-mode: the prototype records a dispatched
-  reminder package (text + audio + timestamp) and the client reply is captured
-  on the demo response page — through the exact endpoint an IVR or WhatsApp
-  webhook would POST into. Production delivery is below.
+- Delivery legs are implemented but env-gated: without credentials the
+  prototype records the dispatched package (text + audio + timestamp) and
+  the client reply is captured on the demo response page — through the
+  same `record_response` entry point the real webhooks use.
 
 ## Production path
 
@@ -241,6 +241,10 @@ The history tells the story in stages:
    ladder, cancellation, recurring-event spawning, channel-preference
    delivery routing, the reply webhook, analytics, the live feed, the test
    suite, Docker and CI.
+4. The live legs - Sarvam Voice Agents calls and MSG91 SMS senders, the
+   WhatsApp Cloud API sender with its Meta webhook, the Sarvam call-outcome
+   webhook, provider error diagnostics, the input-vars call mechanism and
+   IST-correct reminder rendering.
 
 ## Acknowledgements
 

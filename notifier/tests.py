@@ -1,4 +1,5 @@
-"""Bolo test suite: templates, dispatch workflow, responses, agent tools, views.
+"""Bolo test suite: templates, dispatch workflow, delivery services,
+webhooks, responses, agent tools, views.
 
 Sarvam is mocked everywhere, so the suite runs offline and fast. Run with:
 
