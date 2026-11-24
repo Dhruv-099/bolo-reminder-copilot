@@ -770,6 +770,9 @@ class CallServiceTests(TestCase):
         self.assertEqual(overrides["initial_bot_message"], "తెలుగు రిమైండర్")
         self.assertEqual(overrides["initial_language_name"], "Telugu")
 
+        # The API 422s on variables the flow has not declared - none are sent.
+        self.assertNotIn("agent_variables", payload["app_config"])
+
         self.assertEqual(payload["webhook_config"]["metadata"]["event_id"], self.event.id)
         self.assertIn("token=tok", payload["webhook_config"]["url"])
         self.assertEqual(post.call_args.kwargs["headers"]["X-API-Key"], "vk")

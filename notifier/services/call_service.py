@@ -83,15 +83,13 @@ def place_call(event, package):
             },
             # The agent opens by speaking our translated reminder, in the
             # person's own language - then follows its own instruction to
-            # collect the confirmation.
+            # collect the confirmation. No agent_variables are sent: the
+            # instant-outbound API rejects any variable the flow has not
+            # declared on its Variables tab (422 invalid_parameter), and the
+            # opening line already carries the name and the reminder.
             "app_overrides": {
                 "initial_bot_message": text_local,
                 "initial_language_name": language,
-            },
-            "agent_variables": {
-                "person_name": event.person.name,
-                "reminder_text": text_local,
-                "respond_url": f"{public_base_url()}/notifier/respond/{event.id}/",
             },
         },
         "user_config": {"user_phone_number": event.person.phone_number},
