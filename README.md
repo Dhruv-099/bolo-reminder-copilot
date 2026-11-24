@@ -195,13 +195,16 @@ package otherwise:
 - **Real phone calls (implemented):** Sarvam Voice Agents (Samvaad) instant
   outbound API — `notifier/services/call_service.py` places one AI call per
   dispatched reminder. The agent opens by *speaking the already-translated
-  reminder in the person's own language* (initial_bot_message override), then
-  follows its instruction to collect the confirmation. Outcomes POST to
+  reminder in the person's own language* (initial_bot_message override,
+  played directly), then asks whether the client can make it; the answer is
+  extracted after the call into the `client_reply` output variable (Enum:
+  yes / no / unclear). Outcomes POST to
   `/notifier/webhook/call/`: a yes/no answer flows into `record_response`
-  like any other channel; an unanswered call simply stays PENDING for the
+  like any other channel; unclear or unanswered calls stay PENDING for the
   retry ladder. Configure the agent, connection and number in the Voice
-  Agents workspace (see `.env.example`). From ~INR 3.50/minute; numbers
-  rentable, no separate telephony account.
+  Agents workspace (see `.env.example`). Numbers rentable (about INR 59
+  per 30 days plus INR 0.20 per 30-second pulse, unanswered calls free),
+  no separate telephony account.
 - **SMS (implemented):** MSG91's v5 flow API —
   `notifier/services/sms_service.py` texts the vernacular reminder plus a link
   to the client reply page (audio + press-1/press-2), so the loop closes over
