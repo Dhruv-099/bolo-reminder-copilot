@@ -315,9 +315,12 @@ class AgentToolsTests(TestCase):
         self.addCleanup(patcher.stop)
 
     def test_add_reminder_creates_person_and_event(self):
+        # A future slot computed at runtime, so the lead-time assertion below
+        # never rots the way a hardcoded date would.
+        future = (timezone.now() + timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
         result = agent_tools.add_reminder(
             person_name="Dhruv Test", phone_number="919000009101", what="Dental appointment",
-            when="2026-11-22 16:00", preferred_language="hi-IN", event_type="MEETING",
+            when=future, preferred_language="hi-IN", event_type="MEETING",
             message_template="Hi {name}, your {event_type_display} '{details}' is {time_left}.",
         )
         self.assertTrue(result["ok"], result)
