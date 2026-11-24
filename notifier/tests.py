@@ -767,11 +767,12 @@ class CallServiceTests(TestCase):
         self.assertEqual(payload["user_config"]["user_phone_number"], "+919000000022")
 
         overrides = payload["app_config"]["app_overrides"]
-        self.assertEqual(overrides["initial_bot_message"], "తెలుగు రిమైండర్")
+        self.assertNotIn("initial_bot_message", overrides, "the flow carries the call; no opening override")
         self.assertEqual(overrides["initial_language_name"], "Telugu")
 
-        # The API 422s on variables the flow has not declared - none are sent.
-        self.assertNotIn("agent_variables", payload["app_config"])
+        # reminder_text (the translated reminder) is the default variable.
+        variables = payload["app_config"]["agent_variables"]
+        self.assertEqual(variables, {"reminder_text": "తెలుగు రిమైండర్"})
 
         self.assertEqual(payload["webhook_config"]["metadata"]["event_id"], self.event.id)
         self.assertIn("token=tok", payload["webhook_config"]["url"])
@@ -806,12 +807,11 @@ class CallServiceTests(TestCase):
         self.assertEqual(result["error"], "call_failed")
         self.assertIn("app_version: not found", result["detail"])
 
-    def test_input_vars_mode_payload(self):
-        """Flows that declare variables get their values, and no override."""
+    def test_agent_vars_payload(self):
+        """Flows that declare more variables get their values per call."""
         env = {
             **VOICE_ENV,
             "SARVAM_VOICE_AGENT_VARS": "person_name,reminder_text,appointment_time",
-            "SARVAM_VOICE_SKIP_OVERRIDE": "1",
         }
         with mock.patch.dict(os.environ, env), \
              mock.patch("notifier.services.call_service.requests.post") as post:
@@ -821,8 +821,7 @@ class CallServiceTests(TestCase):
 
         payload = post.call_args.kwargs["json"]
         overrides = payload["app_config"]["app_overrides"]
-        self.assertNotIn("initial_bot_message", overrides, "input-vars mode sends no opening override")
-        self.assertEqual(overrides["initial_language_name"], "Telugu")
+        self.assertNotIn("initial_bot_message", overrides, "the flow carries the call; no opening override")
 
         variables = payload["app_config"]["agent_variables"]
         self.assertEqual(variables["person_name"], self.person.name)

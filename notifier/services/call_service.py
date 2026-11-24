@@ -1,18 +1,16 @@
 """Voice-call delivery via Sarvam Voice Agents (Samvaad) instant outbound API.
 
-Places a single AI call per dispatched reminder. Two personalization modes,
-chosen per flow via the environment:
+Places a single AI call per dispatched reminder. Personalization rides the
+flow's declared input variables: reminder_text (the default) carries the
+already-translated reminder with the client's name; the flow's instruction
+relays it and asks whether they can make it, and the answer is extracted
+after the call into the client_reply output variable. The outcome arrives
+via webhook at /notifier/webhook/call/, where connected plus a yes/no/
+unclear flows into record_response like any other channel.
 
-- override (default): the already-translated reminder rides in
-  app_overrides.initial_bot_message and is played verbatim as the opening
-  line; the instruction then collects the confirmation.
-- input vars (SARVAM_VOICE_AGENT_VARS + SARVAM_VOICE_SKIP_OVERRIDE): the flow
-  declares the variables (Variables tab) and the instruction references them;
-  the payload sends the values per call and no opening-line override is sent.
-
-The outcome arrives via webhook at /notifier/webhook/call/, where connected
-plus a yes/no/unclear in the client_reply output variable flows into
-record_response like any other channel.
+The outbound API rejects any variable the flow has not declared on its
+Variables tab, so SARVAM_VOICE_AGENT_VARS names exactly what the flow
+expects (see .env.example for the agent recipe).
 
 A separate workspace API key from Voice Agents settings is required
 (SARVAM_VOICE_API_KEY) - the model-platform SARVAM_API_KEY is not used here.
@@ -62,19 +60,16 @@ def _voice_app_version():
         return 1
 
 
-def _skip_override():
-    """Input-vars mode: no opening-line override; the flow carries the call."""
-    return os.getenv("SARVAM_VOICE_SKIP_OVERRIDE", "") not in ("", "0", "false", "False")
-
-
 def _agent_variables(event, text_local):
     """Values for the variables the flow declares, per SARVAM_VOICE_AGENT_VARS.
 
     The outbound API 422s on any variable the flow has not declared on its
     Variables tab, so only names the flow declares - and the sender knows -
-    are sent, in the order the flow expects them.
+    are sent. reminder_text (the translated reminder, with the client's
+    name) is the default: the documented agent recipe declares it.
     """
-    names = [n.strip() for n in os.getenv("SARVAM_VOICE_AGENT_VARS", "").split(",") if n.strip()]
+    raw = os.getenv("SARVAM_VOICE_AGENT_VARS") or "reminder_text"
+    names = [n.strip() for n in raw.split(",") if n.strip()]
     available = {
         "person_name": event.person.name,
         "reminder_text": text_local,
@@ -103,13 +98,6 @@ def place_call(event, package):
             "metadata": {"event_id": event.id},
         }
 
-    app_overrides = {"initial_language_name": language}
-    if not _skip_override():
-        # The agent opens by speaking our translated reminder, in the
-        # person's own language - then follows its own instruction to
-        # collect the confirmation.
-        app_overrides["initial_bot_message"] = text_local
-
     payload = {
         "app_config": {
             "app_id": os.getenv("SARVAM_VOICE_APP_ID"),
@@ -118,7 +106,12 @@ def place_call(event, package):
                 "connection_id": os.getenv("SARVAM_VOICE_CONNECTION_ID"),
                 "agent_phone_number": os.getenv("SARVAM_VOICE_NUMBER"),
             },
-            "app_overrides": app_overrides,
+            # The flow's greeting and instruction carry the call; the
+            # payload only pins the opening language. The translated
+            # reminder rides in agent_variables as reminder_text.
+            "app_overrides": {
+                "initial_language_name": language,
+            },
         },
         "user_config": {"user_phone_number": event.person.phone_number},
     }
