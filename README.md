@@ -4,8 +4,10 @@
 
 Bolo turns an existing Django notification system into an agent-operated copilot
 that reminds people about upcoming events **in their own language, as a voice
-message** — and closes the loop: every dispatched reminder carries a
-**press-1 / press-2 confirmation** that flows back into the system.
+message** — and closes the loop: every dispatched reminder ends in one
+confirm-or-decline step — press 1 / 2 on the reply page or an IVR, tap
+Confirm / Decline on WhatsApp, or say yes on the AI call — and every reply
+flows back into the system.
 
 A staff member asks an agent: *"who's due for a reminder?"* — the agent lists
 the drafts, plays the generated Hindi / Telugu / Tamil / Marathi audio, waits
@@ -234,7 +236,7 @@ The history tells the story in stages:
    webhooks), personal data scrubbed.
 2. The Sarvam swap - the same app, Vonage removed, one service module and one
    dispatch module added.
-3. The copilot expansion - response capture (press-1/press-2), the dashboard
+3. The copilot expansion - response capture (the confirm-or-decline reply loop), the dashboard
    with transcripts and audio, five more agent tools, quiet hours, retry
    ladder, cancellation, recurring-event spawning, channel-preference
    delivery routing, the reply webhook, analytics, the live feed, the test
