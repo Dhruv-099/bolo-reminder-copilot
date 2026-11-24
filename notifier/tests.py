@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import requests
 from datetime import datetime, time, timedelta
 from unittest import mock
 
@@ -788,6 +789,19 @@ class CallServiceTests(TestCase):
             result = call_service.place_call(self.event, self.package)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "no_attempt_id")
+
+    def test_api_error_body_captured_in_detail(self):
+        error_response = mock.Mock()
+        error_response.text = '{"error":{"data":{"details":"app_version: not found"}}}'
+        with mock.patch.dict(os.environ, VOICE_ENV), \
+             mock.patch("notifier.services.call_service.requests.post") as post:
+            post.return_value.raise_for_status.side_effect = requests.HTTPError(
+                "422 Client Error: Unprocessable Entity", response=error_response
+            )
+            result = call_service.place_call(self.event, self.package)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "call_failed")
+        self.assertIn("app_version: not found", result["detail"])
 
 
 class WhatsappServiceTests(TestCase):

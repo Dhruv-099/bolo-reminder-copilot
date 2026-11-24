@@ -112,8 +112,17 @@ def place_call(event, package):
         response.raise_for_status()
         data = response.json()
     except (requests.RequestException, ValueError) as exc:
-        logger.error("Sarvam outbound call failed for event %s: %s", event.id, exc)
-        return {"ok": False, "error": "call_failed", "detail": str(exc)}
+        # The API's error body names the offending field - keep it in the
+        # failure detail so a rejected call says why, not just that it failed.
+        detail = str(exc)
+        error_response = getattr(exc, "response", None)
+        if error_response is not None:
+            try:
+                detail = f"{exc} :: {error_response.text[:400]}"
+            except Exception:  # noqa: BLE001 - diagnostics must never raise
+                pass
+        logger.error("Sarvam outbound call failed for event %s: %s", event.id, detail)
+        return {"ok": False, "error": "call_failed", "detail": detail}
 
     attempt_id = data.get("attempt_id")
     if not attempt_id:
