@@ -1,11 +1,13 @@
 # notifier/views.py
+import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 
 from django.contrib import messages
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
@@ -242,6 +244,143 @@ def call_outcome_webhook(request):
         result = record_response(int(event_id), digit, channel="voice_call")
         return JsonResponse(result, status=200 if result["ok"] else 400)
     return JsonResponse({"ok": True, "recorded": "connected", "reply": reply or None})
+
+
+# Words a client may text back instead of pressing the buttons.
+WHATSAPP_YES_WORDS = {"yes", "confirmed", "confirm", "1", "haan", "ha", "haa", "okay", "ok"}
+WHATSAPP_NO_WORDS = {"no", "declined", "cancel", "cannot", "can't", "2", "nahi", "nahin", "na"}
+WHATSAPP_BUTTON_ID = re.compile(r"^bolo:(\d+):([12])$")
+
+
+def _whatsapp_word_digit(body):
+    """Map a plain-text reply to a digit, or None when it is neither."""
+    if body in WHATSAPP_YES_WORDS:
+        return "1"
+    if body in WHATSAPP_NO_WORDS:
+        return "2"
+    return None
+
+
+def _whatsapp_reply(message):
+    """(digit, event_id) from a WhatsApp message callback.
+
+    Button and list replies carry the event id in their reply id (set by
+    whatsapp_service); text replies and template button titles carry none,
+    so the caller correlates those by sender phone.
+    """
+    msg_type = str(message.get("type") or "")
+    if msg_type == "interactive":
+        interactive = message.get("interactive") or {}
+        reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+        match = WHATSAPP_BUTTON_ID.match(str(reply.get("id") or ""))
+        if match:
+            return match.group(2), int(match.group(1))
+        return _whatsapp_word_digit(str(reply.get("title") or "").strip().lower()), None
+    if msg_type == "button":
+        match = WHATSAPP_BUTTON_ID.match(str((message.get("button") or {}).get("payload") or ""))
+        if match:
+            return match.group(2), int(match.group(1))
+        return None, None
+    if msg_type == "text":
+        body = str((message.get("text") or {}).get("body") or "").strip().lower()
+        return _whatsapp_word_digit(body), None
+    return None, None
+
+
+def _whatsapp_event_id_for_wa_id(wa_id):
+    """Newest dispatched, still-pending event for a sender's phone number."""
+    if not wa_id:
+        return None
+    return (
+        Event.objects.filter(
+            person__phone_number=f"+{str(wa_id).lstrip('+')}",
+            voice_dispatched_at__isnull=False,
+            cancelled_at__isnull=True,
+            response_value=Event.ResponseValue.PENDING,
+        )
+        .order_by("-voice_dispatched_at")
+        .values_list("id", flat=True)
+        .first()
+    )
+
+
+@csrf_exempt
+def whatsapp_webhook(request):
+    """Meta WhatsApp Cloud API callbacks (the third reply path).
+
+    GET is the portal's subscription handshake: hub.verify_token must equal
+    BOLO_WEBHOOK_TOKEN, and hub.challenge is echoed back as plain text.
+
+    POST carries message and status callbacks. With WHATSAPP_APP_SECRET set,
+    the X-Hub-Signature-256 header is verified against the raw body first.
+    The endpoint stays disabled (403) until BOLO_WEBHOOK_TOKEN is set, like
+    every other webhook.
+
+    - button / list replies (ids set by whatsapp_service, bolo:<event>:1|2)
+      and text yes/no replies funnel into record_response (channel
+      "whatsapp") - the same entry point the demo page and any IVR use.
+    - statuses (sent / delivered / read) are logged only: the reply stays
+      PENDING and the retry ladder owns the silence, like a missed call.
+    """
+    expected = os.getenv("BOLO_WEBHOOK_TOKEN", "")
+    if not expected:
+        return JsonResponse(
+            {
+                "ok": False,
+                "error": "webhook_disabled",
+                "message": "Set BOLO_WEBHOOK_TOKEN in the environment to enable this endpoint.",
+            },
+            status=403,
+        )
+
+    if request.method == "GET":
+        if hmac.compare_digest(str(expected), str(request.GET.get("hub.verify_token", ""))):
+            return HttpResponse(
+                request.GET.get("hub.challenge", ""), content_type="text/plain"
+            )
+        return JsonResponse({"ok": False, "error": "unauthorized"}, status=401)
+
+    if request.method != "POST":
+        return JsonResponse({"ok": False, "error": "method_not_allowed"}, status=405)
+
+    app_secret = os.getenv("WHATSAPP_APP_SECRET", "")
+    if app_secret:
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        digest = hmac.new(app_secret.encode(), request.body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(f"sha256={digest}", signature):
+            return JsonResponse({"ok": False, "error": "bad_signature"}, status=401)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"ok": False, "error": "invalid_json"}, status=400)
+
+    recorded = 0
+    for entry in payload.get("entry") or []:
+        for change in entry.get("changes") or []:
+            value = change.get("value") or {}
+            for message in value.get("messages") or []:
+                digit, event_id = _whatsapp_reply(message)
+                if not digit:
+                    continue
+                if event_id is None:
+                    event_id = _whatsapp_event_id_for_wa_id(message.get("from"))
+                if event_id is None:
+                    logger.info(
+                        "WhatsApp reply without a matching event from %s",
+                        message.get("from"),
+                    )
+                    continue
+                result = record_response(int(event_id), digit, channel="whatsapp")
+                if result.get("ok"):
+                    recorded += 1
+            for status in value.get("statuses") or []:
+                logger.info(
+                    "WhatsApp status %s for message %s",
+                    status.get("status"),
+                    status.get("id"),
+                )
+    return JsonResponse({"ok": True, "recorded": recorded})
 
 
 def analytics(request):

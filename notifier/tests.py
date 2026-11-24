@@ -5,6 +5,8 @@ Sarvam is mocked everywhere, so the suite runs offline and fast. Run with:
     python manage.py test notifier
 """
 
+import hashlib
+import hmac
 import json
 import os
 from datetime import datetime, time, timedelta
@@ -14,7 +16,7 @@ from django.test import Client, TestCase
 from django.utils import timezone
 
 from notifier.models import Event, Person
-from notifier.services import agent_tools, call_service, delivery, sarvam_service, sms_service
+from notifier.services import agent_tools, call_service, delivery, sarvam_service, sms_service, whatsapp_service
 from notifier.services.reminder_dispatch import (
     dispatch_due_reminders,
     find_due_events,
@@ -573,22 +575,18 @@ class DeliveryBranchTests(SarvamMockMixin, TestCase):
         self.assertEqual(delivery_info["via"], "demo_page")
         self.assertEqual(delivery_info["mode"], "recorded")
 
-    def test_whatsapp_without_credentials_falls_back(self):
+    def test_whatsapp_send_failure_falls_back(self):
         person = make_person(
             phone="+919000000011", channel_preference=Person.ChannelPreference.WHATSAPP
         )
-        with mock.patch.object(delivery, "_whatsapp_configured", return_value=False):
+        with mock.patch.object(
+            delivery.whatsapp_service,
+            "send_reminder_message",
+            return_value={"ok": False, "error": "not_configured"},
+        ):
             delivery_info = self._dispatch_one(person)["delivery"]
         self.assertEqual(delivery_info["via"], "whatsapp")
         self.assertEqual(delivery_info["mode"], "recorded_fallback:whatsapp")
-
-    def test_whatsapp_with_credentials_marks_pending_real_send(self):
-        person = make_person(
-            phone="+919000000012", channel_preference=Person.ChannelPreference.WHATSAPP
-        )
-        with mock.patch.object(delivery, "_whatsapp_configured", return_value=True):
-            delivery_info = self._dispatch_one(person)["delivery"]
-        self.assertEqual(delivery_info["mode"], "recorded_pending_real_send")
 
     def test_voice_call_and_sms_fall_back(self):
         for pref, via in (
@@ -792,6 +790,60 @@ class CallServiceTests(TestCase):
         self.assertEqual(result["error"], "no_attempt_id")
 
 
+class WhatsappServiceTests(TestCase):
+    def setUp(self):
+        self.person = make_person(phone="+919000000041")
+        self.event = make_event(self.person)
+        self.package = {"text_local": "नमस्ते, यह अनुस्मारक है।", "text_english": "Hi, this is a reminder."}
+
+    def test_not_configured(self):
+        with mock.patch.object(whatsapp_service, "_whatsapp_configured", return_value=False):
+            result = whatsapp_service.send_reminder_message(self.event, self.package)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "not_configured")
+
+    def test_payload_shape(self):
+        with mock.patch.dict(
+            os.environ, {"WHATSAPP_PHONE_NUMBER_ID": "pnid", "WHATSAPP_ACCESS_TOKEN": "wtok"}
+        ), mock.patch("notifier.services.whatsapp_service.requests.post") as post:
+            post.return_value.json.return_value = {"messages": [{"id": "wamid.1"}]}
+            result = whatsapp_service.send_reminder_message(self.event, self.package)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["message_id"], "wamid.1")
+        self.assertIn("/notifier/respond/", result["link"])
+
+        self.assertIn("/pnid/messages", post.call_args.args[0])
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["to"], "919000000041", "leading plus must be stripped")
+        interactive = payload["interactive"]
+        self.assertIn("नमस्ते", interactive["body"]["text"])
+        self.assertIn("/notifier/respond/", interactive["body"]["text"])
+        buttons = interactive["action"]["buttons"]
+        self.assertEqual(buttons[0]["reply"]["id"], f"bolo:{self.event.id}:1")
+        self.assertEqual(buttons[1]["reply"]["id"], f"bolo:{self.event.id}:2")
+        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer wtok")
+
+    def test_provider_rejection(self):
+        with mock.patch.dict(
+            os.environ, {"WHATSAPP_PHONE_NUMBER_ID": "p", "WHATSAPP_ACCESS_TOKEN": "t"}
+        ), mock.patch("notifier.services.whatsapp_service.requests.post") as post:
+            post.return_value.json.return_value = {"messages": []}
+            result = whatsapp_service.send_reminder_message(self.event, self.package)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "send_rejected")
+
+    def test_send_exception_is_failure_not_crash(self):
+        with mock.patch.dict(
+            os.environ, {"WHATSAPP_PHONE_NUMBER_ID": "p", "WHATSAPP_ACCESS_TOKEN": "t"}
+        ), mock.patch("notifier.services.whatsapp_service.requests.post") as post:
+            import requests as requests_lib
+
+            post.side_effect = requests_lib.RequestException("boom")
+            result = whatsapp_service.send_reminder_message(self.event, self.package)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "send_failed")
+
+
 class RealDeliveryRoutingTests(SarvamMockMixin, TestCase):
     """Delivery routes through the real SMS / call services when configured."""
 
@@ -825,6 +877,26 @@ class RealDeliveryRoutingTests(SarvamMockMixin, TestCase):
         self.assertEqual(delivery_info["mode"], "call_placed")
         self.assertEqual(delivery_info["attempt_id"], "att-9")
         place.assert_called_once()
+
+    def test_whatsapp_configured_sends(self):
+        person = make_person(
+            phone="+919000000033", channel_preference=Person.ChannelPreference.WHATSAPP
+        )
+        with mock.patch.object(
+            delivery.whatsapp_service,
+            "send_reminder_message",
+            return_value={
+                "ok": True,
+                "provider": "whatsapp_cloud",
+                "message_id": "wamid.9",
+                "link": "http://192.168.1.15:8000/notifier/respond/1/",
+            },
+        ) as send:
+            delivery_info = self._dispatch_one(person)["delivery"]
+        self.assertEqual(delivery_info["mode"], "sent:whatsapp_cloud")
+        self.assertEqual(delivery_info["message_id"], "wamid.9")
+        self.assertIn("/notifier/respond/", delivery_info["link"])
+        send.assert_called_once()
 
 
 class CallOutcomeWebhookTests(TestCase):
@@ -886,3 +958,144 @@ class CallOutcomeWebhookTests(TestCase):
     def test_missing_token_unauthorized(self):
         response = self.post_payload({"status": "no_answer"}, token=None)
         self.assertEqual(response.status_code, 401)
+
+
+class WhatsappWebhookTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.person = make_person(phone="+919000000042")
+        self.event = make_event(self.person, voice_dispatched_at=timezone.now())
+        self.env = mock.patch.dict(os.environ, {"BOLO_WEBHOOK_TOKEN": "tok"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def post_payload(self, payload, **extra):
+        return self.client.post(
+            "/notifier/webhook/whatsapp/",
+            data=json.dumps(payload),
+            content_type="application/json",
+            **extra,
+        )
+
+    def button_payload(self, reply_id, title="Confirm"):
+        return {
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "messages": [
+                                    {
+                                        "from": "919000000042",
+                                        "type": "interactive",
+                                        "interactive": {
+                                            "type": "button_reply",
+                                            "button_reply": {"id": reply_id, "title": title},
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+    def text_payload(self, body, wa_id="919000000042"):
+        return {
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "messages": [
+                                    {"from": wa_id, "type": "text", "text": {"body": body}}
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+    def test_hub_verification_echoes_challenge(self):
+        response = self.client.get(
+            "/notifier/webhook/whatsapp/",
+            {"hub.mode": "subscribe", "hub.verify_token": "tok", "hub.challenge": "chal-42"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode(), "chal-42")
+
+    def test_hub_verification_rejects_wrong_token(self):
+        response = self.client.get(
+            "/notifier/webhook/whatsapp/", {"hub.verify_token": "nope", "hub.challenge": "x"}
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_disabled_without_env_token(self):
+        os.environ.pop("BOLO_WEBHOOK_TOKEN", None)
+        try:
+            response = self.client.get("/notifier/webhook/whatsapp/", {"hub.verify_token": "tok"})
+        finally:
+            os.environ["BOLO_WEBHOOK_TOKEN"] = "tok"
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "webhook_disabled")
+
+    def test_button_reply_records_confirmation(self):
+        response = self.post_payload(self.button_payload(f"bolo:{self.event.id}:1"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recorded"], 1)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.CONFIRMED)
+        self.assertEqual(self.event.response_channel, "whatsapp")
+
+    def test_button_reply_records_decline(self):
+        response = self.post_payload(
+            self.button_payload(f"bolo:{self.event.id}:2", title="Decline")
+        )
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.DECLINED)
+
+    def test_text_reply_matches_by_phone(self):
+        response = self.post_payload(self.text_payload("haan"))
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.CONFIRMED)
+        self.assertEqual(self.event.response_channel, "whatsapp")
+
+    def test_unrecognized_text_stays_pending(self):
+        response = self.post_payload(self.text_payload("maybe later"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recorded"], 0)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.PENDING)
+
+    def test_reply_from_unknown_number_is_ignored(self):
+        response = self.post_payload(self.text_payload("yes", wa_id="919000000099"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recorded"], 0)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.response_value, Event.ResponseValue.PENDING)
+
+    def test_signature_verified_when_app_secret_set(self):
+        os.environ["WHATSAPP_APP_SECRET"] = "shh"
+        try:
+            body = json.dumps(self.button_payload(f"bolo:{self.event.id}:1"))
+            digest = hmac.new(b"shh", body.encode(), hashlib.sha256).hexdigest()
+            ok = self.client.post(
+                "/notifier/webhook/whatsapp/",
+                data=body,
+                content_type="application/json",
+                HTTP_X_HUB_SIGNATURE_256=f"sha256={digest}",
+            )
+            self.assertEqual(ok.status_code, 200)
+            bad = self.client.post(
+                "/notifier/webhook/whatsapp/",
+                data=body,
+                content_type="application/json",
+                HTTP_X_HUB_SIGNATURE_256="sha256=deadbeef",
+            )
+            self.assertEqual(bad.status_code, 401)
+        finally:
+            os.environ.pop("WHATSAPP_APP_SECRET", None)

@@ -2,34 +2,21 @@
 preference.
 
 Every dispatched reminder passes through deliver() after the confirm-gated
-write. Real channel senders (WhatsApp Cloud API / Twilio, an IVR telephony
-bridge, an SMS gateway) plug in as handlers below; until their wiring lands,
-each channel falls back to the recorded demo package, so the dispatch
-workflow - preview, confirm, retry ladder, responses - behaves identically
-either way.
+write. Real channel senders (WhatsApp Cloud API, Sarvam Voice Agents, MSG91)
+plug in as handlers below; when their credentials are absent each channel
+falls back to the recorded demo package, so the dispatch workflow - preview,
+confirm, retry ladder, responses - behaves identically either way.
 
 Replies from real channels come back through /notifier/webhook/response/
-(sees views.response_webhook); the demo respond page posts the same digits.
+(see views.response_webhook); the demo respond page posts the same digits.
 """
 
 import logging
-import os
 
 from notifier.models import Person
-from notifier.services import call_service, sms_service
+from notifier.services import call_service, sms_service, whatsapp_service
 
 logger = logging.getLogger(__name__)
-
-
-def _whatsapp_configured():
-    """True when Meta Cloud API (or Twilio sandbox) credentials are present."""
-    if os.getenv("WHATSAPP_PHONE_NUMBER_ID") and os.getenv("WHATSAPP_ACCESS_TOKEN"):
-        return True
-    return bool(
-        os.getenv("TWILIO_ACCOUNT_SID")
-        and os.getenv("TWILIO_AUTH_TOKEN")
-        and os.getenv("TWILIO_WHATSAPP_FROM")
-    )
 
 
 def deliver_via_demo_page(event, package):
@@ -38,19 +25,20 @@ def deliver_via_demo_page(event, package):
 
 
 def deliver_via_whatsapp(event, package):
-    if _whatsapp_configured():
-        # Credentials detected: the real sender lands here when the delivery
-        # leg is wired (prototype-deferred). Record the package meanwhile.
-        logger.info(
-            "WhatsApp credentials detected; real sender lands here "
-            "(prototype-deferred). Package recorded for event %s.",
-            event.id,
-        )
-        return {"via": "whatsapp", "mode": "recorded_pending_real_send"}
+    """Message the reminder with Confirm / Decline buttons via the Meta
+    WhatsApp Cloud API when configured."""
+    result = whatsapp_service.send_reminder_message(event, package)
+    if result["ok"]:
+        return {
+            "via": "whatsapp",
+            "mode": "sent:whatsapp_cloud",
+            "message_id": result.get("message_id"),
+            "link": result.get("link"),
+        }
     return {
         "via": "whatsapp",
         "mode": "recorded_fallback:whatsapp",
-        "note": "no WhatsApp credentials in the environment - package recorded",
+        "note": f"whatsapp not sent ({result.get('error')}) - package recorded",
     }
 
 

@@ -13,4 +13,5 @@ urlpatterns = [
     path('analytics/', views.analytics, name='analytics'),
     path('webhook/response/', views.response_webhook, name='response_webhook'),
     path('webhook/call/', views.call_outcome_webhook, name='call_outcome_webhook'),
+    path('webhook/whatsapp/', views.whatsapp_webhook, name='whatsapp_webhook'),
 ]

@@ -43,9 +43,9 @@ workflow is a conversation (or one dashboard, or one cron call - your pick).
 | **Analytics** (`/notifier/analytics/`) | Response rate per language - the actual proof that vernacular reminders get answered. |
 | **MCP tools** | `dispatch_due_reminders`, `add_reminder`, `reschedule_event`, `cancel_reminder`, `list_responses`, `reminder_digest`. |
 | **Management commands** | `send_notifications` (manual), `auto_dispatch` (cron-friendly; `--loop-minutes N` to keep running). |
-| **Reply webhooks** | `POST /notifier/webhook/response/` (IVR / WhatsApp digits) and `POST /notifier/webhook/call/` (Sarvam call outcomes) — token-authenticated via `BOLO_WEBHOOK_TOKEN`, CSRF-exempt, disabled (403) until the token is set. |
+| **Reply webhooks** | `POST /notifier/webhook/response/` (IVR / bridge digits), `POST /notifier/webhook/call/` (Sarvam call outcomes) and `GET+POST /notifier/webhook/whatsapp/` (Meta button and text replies) — token-gated via `BOLO_WEBHOOK_TOKEN`, CSRF-exempt, disabled (403) until the token is set. |
 | **DevOps** | `Dockerfile` + `docker-compose.yml` (migrations + first-boot demo seed on start, media volume, auto-restart), GitHub Actions CI (system check, migration check, full test suite — runs offline, no API key). |
-| **Test suite** | 76 tests, Sarvam mocked - `python manage.py test notifier` runs offline in ~4s. |
+| **Test suite** | 89 tests, Sarvam mocked - `python manage.py test notifier` runs offline in ~4s. |
 
 The reminder lifecycle knows about quiet hours (per person, wraps midnight),
 a retry ladder (no reply after N hours → one more attempt, capped),
@@ -53,9 +53,9 @@ cancellation (cancelled events are never sent) and **recurring events** —
 dispatching a daily/weekly/monthly reminder automatically schedules its next
 occurrence, idempotently, chained to the root event. Dispatch routes each package by the person's **channel preference** (WhatsApp /
 voice call / SMS / demo page) through `notifier/services/delivery.py`; voice
-calls (Sarvam Voice Agents instant outbound) and SMS (MSG91 + respond link) are
-implemented and env-gated, WhatsApp records the package honestly until
-credentials exist, and a handler failure can never break a dispatch. Phone
+calls (Sarvam Voice Agents instant outbound), SMS (MSG91 + respond link) and
+WhatsApp (Meta Cloud API + Confirm / Decline buttons) are implemented and
+env-gated, and a handler failure can never break a dispatch. Phone
 numbers normalize to E.164 on save. Translation and TTS
 are deduped by an in-process cache, and every Sarvam call retries with bounded
 exponential backoff.
@@ -114,7 +114,7 @@ pip install -r requirements.txt
 copy .env.example .env             # then add your SARVAM_API_KEY
 python manage.py migrate
 python create_synthetic_data.py    # 6 fictional people, 8 events, 6 due
-python manage.py test notifier     # 76 tests, offline, no API key needed
+python manage.py test notifier     # 89 tests, offline, no API key needed
 python manage.py runserver         # open http://127.0.0.1:8000/notifier/dashboard/
 ```
 
@@ -188,7 +188,7 @@ in any config. The same server file plugs into Claude Desktop or Cursor.
 
 ## Production path
 
-Two of the three legs are **implemented and env-gated** — they activate the
+All three legs are **implemented and env-gated** — they activate the
 moment their credentials appear in `.env`, and fall back to the recorded demo
 package otherwise:
 
@@ -207,10 +207,19 @@ package otherwise:
   to the client reply page (audio + press-1/press-2), so the loop closes over
   plain SMS with no app required. Needs a DLT-registered template (TRAI);
   VAR1 carries the text, VAR2 the link.
-- **WhatsApp (the remaining gap):** the dispatch package (text + audio) plugs
-  into the WhatsApp Business API via Meta Cloud API, Gupshup or Twilio; the
-  channel handler routes to it and records the package honestly until
-  credentials exist, and replies land in the same response webhook.
+- **WhatsApp (implemented):** Meta's WhatsApp Cloud API —
+  `notifier/services/whatsapp_service.py` sends the vernacular reminder plus
+  the respond link as one interactive message with Confirm / Decline buttons
+  whose ids carry the event id. Replies POST to
+  `/notifier/webhook/whatsapp/`: the portal handshake uses `BOLO_WEBHOOK_TOKEN`
+  as the verify token, `WHATSAPP_APP_SECRET` verifies `X-Hub-Signature-256`
+  on callbacks, button replies correlate by their id and plain-text yes/no by
+  sender phone, all funneling into `record_response` like any other channel.
+  Business-initiated freeform messages deliver inside the 24-hour
+  customer-service window or to test numbers; production campaigns use a
+  pre-approved utility template (the WhatsApp analogue of the DLT note).
+  Prefer an aggregator? Swap the sender module for Twilio or Gupshup; the
+  dispatch package and webhook stay unchanged.
 - The composed tools do not change: only the final delivery leg does.
 
 ## Repository history
