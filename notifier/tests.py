@@ -92,6 +92,14 @@ class PersonalizeMessageTests(TestCase):
         text = personalize_message(event)
         self.assertNotIn("{{literal}}", text)
 
+    def test_time_and_date_render_in_the_project_timezone(self):
+        """{time}/{date} speak IST, not the stored UTC instant."""
+        event = make_event(make_person(), message_template="{time} on {date}.")
+        text = personalize_message(event)
+        local = timezone.localtime(event.event_datetime)
+        self.assertIn(local.strftime("%I:%M %p"), text)
+        self.assertIn(local.strftime("%B %d, %Y"), text)
+
 
 class DueSelectionTests(TestCase):
     def test_not_due_before_lead_time(self):

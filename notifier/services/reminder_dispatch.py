@@ -154,8 +154,8 @@ def personalize_message(event):
         "name": person_name.split()[0],
         "event_type_display": event.get_event_type_display().lower(),
         "details": event.details or "",
-        "time": event.event_datetime.strftime("%I:%M %p"),
-        "date": event.event_datetime.strftime("%B %d, %Y"),
+        "time": timezone.localtime(event.event_datetime).strftime("%I:%M %p"),
+        "date": timezone.localtime(event.event_datetime).strftime("%B %d, %Y"),
         "time_left": format_time_left(event.event_datetime),
     }
     try:

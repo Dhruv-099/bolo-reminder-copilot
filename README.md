@@ -45,7 +45,7 @@ workflow is a conversation (or one dashboard, or one cron call - your pick).
 | **Management commands** | `send_notifications` (manual), `auto_dispatch` (cron-friendly; `--loop-minutes N` to keep running). |
 | **Reply webhooks** | `POST /notifier/webhook/response/` (IVR / bridge digits), `POST /notifier/webhook/call/` (Sarvam call outcomes) and `GET+POST /notifier/webhook/whatsapp/` (Meta button and text replies) — token-gated via `BOLO_WEBHOOK_TOKEN`, CSRF-exempt, disabled (403) until the token is set. |
 | **DevOps** | `Dockerfile` + `docker-compose.yml` (migrations + first-boot demo seed on start, media volume, auto-restart), GitHub Actions CI (system check, migration check, full test suite — runs offline, no API key). |
-| **Test suite** | 89 tests, Sarvam mocked - `python manage.py test notifier` runs offline in ~4s. |
+| **Test suite** | 93 tests, Sarvam mocked - `python manage.py test notifier` runs offline in ~4s. |
 
 The reminder lifecycle knows about quiet hours (per person, wraps midnight),
 a retry ladder (no reply after N hours → one more attempt, capped),
@@ -114,7 +114,7 @@ pip install -r requirements.txt
 copy .env.example .env             # then add your SARVAM_API_KEY
 python manage.py migrate
 python create_synthetic_data.py    # 6 fictional people, 8 events, 6 due
-python manage.py test notifier     # 89 tests, offline, no API key needed
+python manage.py test notifier     # 93 tests, offline, no API key needed
 python manage.py runserver         # open http://127.0.0.1:8000/notifier/dashboard/
 ```
 
