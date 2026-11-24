@@ -1,11 +1,18 @@
 """Voice-call delivery via Sarvam Voice Agents (Samvaad) instant outbound API.
 
-Places a single AI call per dispatched reminder: the agent speaks the already
-translated reminder as its opening line (initial_bot_message override), then
-follows its own instruction - which should ask the client to confirm and set
-an output variable (client_reply by default) - and the outcome arrives via
-webhook at /notifier/webhook/call/, where connected + a yes/no reply flows
-into record_response like any other channel.
+Places a single AI call per dispatched reminder. Two personalization modes,
+chosen per flow via the environment:
+
+- override (default): the already-translated reminder rides in
+  app_overrides.initial_bot_message and is played verbatim as the opening
+  line; the instruction then collects the confirmation.
+- input vars (SARVAM_VOICE_AGENT_VARS + SARVAM_VOICE_SKIP_OVERRIDE): the flow
+  declares the variables (Variables tab) and the instruction references them;
+  the payload sends the values per call and no opening-line override is sent.
+
+The outcome arrives via webhook at /notifier/webhook/call/, where connected
+plus a yes/no/unclear in the client_reply output variable flows into
+record_response like any other channel.
 
 A separate workspace API key from Voice Agents settings is required
 (SARVAM_VOICE_API_KEY) - the model-platform SARVAM_API_KEY is not used here.
@@ -16,6 +23,7 @@ import logging
 import os
 
 import requests
+from django.utils import timezone
 
 from notifier.utils import public_base_url
 
@@ -54,6 +62,28 @@ def _voice_app_version():
         return 1
 
 
+def _skip_override():
+    """Input-vars mode: no opening-line override; the flow carries the call."""
+    return os.getenv("SARVAM_VOICE_SKIP_OVERRIDE", "") not in ("", "0", "false", "False")
+
+
+def _agent_variables(event, text_local):
+    """Values for the variables the flow declares, per SARVAM_VOICE_AGENT_VARS.
+
+    The outbound API 422s on any variable the flow has not declared on its
+    Variables tab, so only names the flow declares - and the sender knows -
+    are sent, in the order the flow expects them.
+    """
+    names = [n.strip() for n in os.getenv("SARVAM_VOICE_AGENT_VARS", "").split(",") if n.strip()]
+    available = {
+        "person_name": event.person.name,
+        "reminder_text": text_local,
+        "appointment_time": timezone.localtime(event.event_datetime).strftime("%d %B, %I:%M %p"),
+        "respond_url": f"{public_base_url()}/notifier/respond/{event.id}/",
+    }
+    return {name: available[name] for name in names if name in available}
+
+
 def place_call(event, package):
     """Place one instant outbound AI call for a dispatched reminder."""
     if not _voice_configured():
@@ -73,6 +103,13 @@ def place_call(event, package):
             "metadata": {"event_id": event.id},
         }
 
+    app_overrides = {"initial_language_name": language}
+    if not _skip_override():
+        # The agent opens by speaking our translated reminder, in the
+        # person's own language - then follows its own instruction to
+        # collect the confirmation.
+        app_overrides["initial_bot_message"] = text_local
+
     payload = {
         "app_config": {
             "app_id": os.getenv("SARVAM_VOICE_APP_ID"),
@@ -81,19 +118,13 @@ def place_call(event, package):
                 "connection_id": os.getenv("SARVAM_VOICE_CONNECTION_ID"),
                 "agent_phone_number": os.getenv("SARVAM_VOICE_NUMBER"),
             },
-            # The agent opens by speaking our translated reminder, in the
-            # person's own language - then follows its own instruction to
-            # collect the confirmation. No agent_variables are sent: the
-            # instant-outbound API rejects any variable the flow has not
-            # declared on its Variables tab (422 invalid_parameter), and the
-            # opening line already carries the name and the reminder.
-            "app_overrides": {
-                "initial_bot_message": text_local,
-                "initial_language_name": language,
-            },
+            "app_overrides": app_overrides,
         },
         "user_config": {"user_phone_number": event.person.phone_number},
     }
+    agent_variables = _agent_variables(event, text_local)
+    if agent_variables:
+        payload["app_config"]["agent_variables"] = agent_variables
     if webhook_config:
         payload["webhook_config"] = webhook_config
 

@@ -806,6 +806,38 @@ class CallServiceTests(TestCase):
         self.assertEqual(result["error"], "call_failed")
         self.assertIn("app_version: not found", result["detail"])
 
+    def test_input_vars_mode_payload(self):
+        """Flows that declare variables get their values, and no override."""
+        env = {
+            **VOICE_ENV,
+            "SARVAM_VOICE_AGENT_VARS": "person_name,reminder_text,appointment_time",
+            "SARVAM_VOICE_SKIP_OVERRIDE": "1",
+        }
+        with mock.patch.dict(os.environ, env), \
+             mock.patch("notifier.services.call_service.requests.post") as post:
+            post.return_value.json.return_value = {"attempt_id": "att-vars"}
+            result = call_service.place_call(self.event, self.package)
+        self.assertTrue(result["ok"], result)
+
+        payload = post.call_args.kwargs["json"]
+        overrides = payload["app_config"]["app_overrides"]
+        self.assertNotIn("initial_bot_message", overrides, "input-vars mode sends no opening override")
+        self.assertEqual(overrides["initial_language_name"], "Telugu")
+
+        variables = payload["app_config"]["agent_variables"]
+        self.assertEqual(variables["person_name"], self.person.name)
+        self.assertEqual(variables["reminder_text"], "తెలుగు రిమైండర్")
+        self.assertIn(":", variables["appointment_time"], "local datetime formatted for the flow")
+
+    def test_unknown_variable_names_are_not_sent(self):
+        env = {**VOICE_ENV, "SARVAM_VOICE_AGENT_VARS": "person_name,banana"}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch("notifier.services.call_service.requests.post") as post:
+            post.return_value.json.return_value = {"attempt_id": "a"}
+            call_service.place_call(self.event, self.package)
+        variables = post.call_args.kwargs["json"]["app_config"]["agent_variables"]
+        self.assertEqual(list(variables), ["person_name"])
+
 
 class WhatsappServiceTests(TestCase):
     def setUp(self):
